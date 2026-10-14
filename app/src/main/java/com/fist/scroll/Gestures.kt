@@ -1,13 +1,16 @@
 package com.fist.scroll
 
+import com.google.mediapipe.tasks.components.containers.Landmark
 import com.google.mediapipe.tasks.components.containers.NormalizedLandmark
 import kotlin.math.abs
-import kotlin.math.hypot
+import kotlin.math.acos
+import kotlin.math.sqrt
 
 object Mode {
     const val FIST = "fist"
     const val TWO = "two"
     const val WAVE = "wave"
+    const val WINK = "wink"
 }
 
 /** Поза руки по одному кадру. */
@@ -19,12 +22,15 @@ enum class Pose(val title: String) {
     OTHER("рука")
 }
 
+private class P(val x: Float, val y: Float, val z: Float)
+
 /**
  * Решает, пора ли делать свайп. Вызывается на каждый кадр.
  * sensitivity: 1..10 (больше = легче срабатывает).
  */
 class GestureEngine {
 
+    private var mode = ""
     private var holdFrames = 0
     private var releaseFrames = 99
     private var armed = true
@@ -34,49 +40,110 @@ class GestureEngine {
     private val trail = ArrayList<Sample>()
     private var lastSeen = 0L
 
+    // состояние пальцев: индекс, средний, безымянный, мизинец
+    private val fingers = arrayOf(
+        intArrayOf(5, 6, 7, 8),
+        intArrayOf(9, 10, 11, 12),
+        intArrayOf(13, 14, 15, 16),
+        intArrayOf(17, 18, 19, 20)
+    )
+    private val smooth = FloatArray(4)
+    private val ext = BooleanArray(4)
+    private var fingerInit = false
+
     var lastPose = Pose.NONE
         private set
+    var lastDetail = ""
+        private set
 
-    /** Возвращает true, если нужно сделать свайп. */
-    fun update(
+    private fun syncMode(m: String) {
+        if (mode != m) {
+            mode = m
+            holdFrames = 0
+            releaseFrames = 99
+            armed = true
+            trail.clear()
+            fingerInit = false
+        }
+    }
+
+    /** Общая логика: жест должен продержаться пару кадров, потом его надо «отпустить». */
+    private fun hold(match: Boolean, need: Int, now: Long): Boolean {
+        var fire = false
+        if (match) {
+            holdFrames++
+            releaseFrames = 0
+            if (holdFrames >= need && armed && now - lastTrigger > 1000) {
+                fire = true
+                armed = false
+                lastTrigger = now
+            }
+        } else {
+            holdFrames = 0
+            releaseFrames++
+            if (releaseFrames >= 3) armed = true
+        }
+        return fire
+    }
+
+    /** Режимы с рукой: кулак, два пальца, взмах. Возвращает true, если пора листать. */
+    fun updateHand(
         lm: List<NormalizedLandmark>?,
+        world: List<Landmark>?,
         w: Int,
         h: Int,
         now: Long,
         mode: String,
         sensitivity: Int
     ): Boolean {
-        val pose = if (lm == null) Pose.NONE else classify(lm, w, h)
-        lastPose = pose
+        syncMode(mode)
 
-        val cooldownOk = now - lastTrigger > 1000
-        var fire = false
+        // для пальцев берём «мировые» 3D-координаты: они не зависят от размера руки и расстояния
+        val pts: List<P>? = when {
+            world != null && world.size >= 21 -> world.map { P(it.x(), it.y(), it.z()) }
+            lm != null && lm.size >= 21 -> lm.map { P(it.x() * w, it.y() * h, it.z() * w) }
+            else -> null
+        }
+        if (pts == null) {
+            fingerInit = false
+            lastPose = Pose.NONE
+            lastDetail = ""
+        } else {
+            lastPose = classify(pts)
+        }
 
         if (mode == Mode.WAVE) {
-            fire = updateWave(lm, now, sensitivity) && cooldownOk
-        } else {
-            val target = if (mode == Mode.FIST) Pose.FIST else Pose.TWO
-            val need = if (sensitivity >= 7) 2 else 3
-            if (pose == target) {
-                holdFrames++
-                releaseFrames = 0
-                if (holdFrames >= need && armed && cooldownOk) {
-                    fire = true
-                    armed = false
-                }
-            } else {
-                holdFrames = 0
-                releaseFrames++
-                // Чтобы повторить свайп, жест нужно «отпустить» на пару кадров.
-                if (releaseFrames >= 3) armed = true
+            val fire = updateWave(lm, now, sensitivity) && now - lastTrigger > 1000
+            if (fire) {
+                lastTrigger = now
+                trail.clear()
             }
+            return fire
         }
 
-        if (fire) {
-            lastTrigger = now
-            trail.clear()
-        }
-        return fire
+        val target = if (mode == Mode.FIST) Pose.FIST else Pose.TWO
+        val need = if (sensitivity >= 7) 2 else 3
+        return hold(lastPose == target, need, now)
+    }
+
+    var lastFace = false
+        private set
+    var lastLeft = 0f
+        private set
+    var lastRight = 0f
+        private set
+
+    /** Режим подмигивания: один глаз закрыт, другой открыт. */
+    fun updateWink(hasFace: Boolean, left: Float, right: Float, now: Long, sensitivity: Int): Boolean {
+        syncMode(Mode.WINK)
+        lastFace = hasFace
+        lastLeft = left
+        lastRight = right
+        val closed = 0.75f - 0.04f * sensitivity
+        val open = 0.30f + 0.02f * sensitivity
+        val wink = hasFace &&
+            ((left > closed && right < open) || (right > closed && left < open))
+        return hold(wink, if (sensitivity >= 8) 2 else 3, now)
     }
 
     private fun updateWave(lm: List<NormalizedLandmark>?, now: Long, sensitivity: Int): Boolean {
@@ -102,27 +169,51 @@ class GestureEngine {
         val first = trail[0]
         val dy = cy - first.y
         val dx = cx - first.x
-        // порог: чем выше чувствительность, тем короче нужен взмах
         val threshold = 0.40f - 0.025f * sensitivity
         return dy < -threshold && abs(dx) < abs(dy) * 1.3f
     }
 
-    private fun classify(lm: List<NormalizedLandmark>, w: Int, h: Int): Pose {
-        fun d(a: Int, b: Int): Float =
-            hypot((lm[a].x() - lm[b].x()) * w, (lm[a].y() - lm[b].y()) * h)
+    /** Угол в точке b между отрезками b-a и b-c, в градусах (180 = прямой палец). */
+    private fun angle(a: P, b: P, c: P): Float {
+        val ux = a.x - b.x
+        val uy = a.y - b.y
+        val uz = a.z - b.z
+        val vx = c.x - b.x
+        val vy = c.y - b.y
+        val vz = c.z - b.z
+        val nu = sqrt(ux * ux + uy * uy + uz * uz)
+        val nv = sqrt(vx * vx + vy * vy + vz * vz)
+        if (nu < 1e-6f || nv < 1e-6f) return 180f
+        val cos = ((ux * vx + uy * vy + uz * vz) / (nu * nv)).coerceIn(-1f, 1f)
+        return Math.toDegrees(acos(cos.toDouble())).toFloat()
+    }
 
-        // палец вытянут, если кончик заметно дальше от запястья, чем средний сустав
-        fun extended(pip: Int, tip: Int) = d(0, tip) > d(0, pip) * 1.2f
+    private fun classify(p: List<P>): Pose {
+        for (i in 0 until 4) {
+            val f = fingers[i]
+            val aPip = angle(p[f[0]], p[f[1]], p[f[2]])
+            val aDip = angle(p[f[1]], p[f[2]], p[f[3]])
+            val m = 0.65f * aPip + 0.35f * aDip
+            if (!fingerInit) {
+                smooth[i] = m
+                ext[i] = m > 140f
+            } else {
+                smooth[i] = 0.5f * smooth[i] + 0.5f * m
+                // гистерезис: между 125 и 155 палец остаётся в прежнем состоянии
+                if (smooth[i] > 155f) ext[i] = true
+                else if (smooth[i] < 125f) ext[i] = false
+            }
+        }
+        fingerInit = true
 
-        val index = extended(6, 8)
-        val middle = extended(10, 12)
-        val ring = extended(14, 16)
-        val pinky = extended(18, 20)
-        val count = listOf(index, middle, ring, pinky).count { it }
+        val names = arrayOf("указ.", "средн.", "безым.", "мизин.")
+        lastDetail = ext.indices.filter { ext[it] }.joinToString(prefix = " [", postfix = "]") { names[it] }
+            .let { if (it == " []") " [все согнуты]" else it }
 
+        val count = ext.count { it }
         return when {
             count == 0 -> Pose.FIST
-            index && middle && !ring && !pinky -> Pose.TWO
+            ext[0] && ext[1] && !ext[2] && !ext[3] -> Pose.TWO
             count == 4 -> Pose.OPEN
             else -> Pose.OTHER
         }

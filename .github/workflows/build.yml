@@ -23,11 +23,13 @@ jobs:
         with:
           gradle-version: 8.10.2
 
-      - name: Download hand model
+      - name: Download models
         run: |
           mkdir -p app/src/main/assets
           curl -fL -o app/src/main/assets/hand_landmarker.task \
             https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task
+          curl -fL -o app/src/main/assets/face_landmarker.task \
+            https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/latest/face_landmarker.task
           ls -l app/src/main/assets
 
       - name: Build debug APK
@@ -49,12 +51,14 @@ jobs:
 
       - name: Publish log on failure
         if: failure()
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
-          [ -f build.log ] || echo "Сборка упала до запуска Gradle (см. шаг Download hand model)" > build.log
-          gh release create "failed-${{ github.run_number }}" build.log \
-            --target "${{ github.sha }}" \
-            --title "FAILED build ${{ github.run_number }}" \
-            --notes "Лог ошибки сборки" \
-            --prerelease
+          [ -f build.log ] || echo "Сборка упала до запуска Gradle (см. шаг Download models)" > build.log
+          tail -n 400 build.log > /tmp/log.txt
+          git config user.name "build-bot"
+          git config user.email "noreply@example.com"
+          git checkout --orphan buildlog
+          git rm -rf . -q
+          cp /tmp/log.txt build.log
+          git add -f build.log
+          git commit -qm "build log ${{ github.run_number }}"
+          git push -f origin buildlog

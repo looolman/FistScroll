@@ -69,7 +69,8 @@ class MainActivity : Activity() {
         val options = listOf(
             Mode.FIST to "✊ Кулак — сожми руку перед камерой",
             Mode.TWO to "✌ Два пальца — покажи знак V",
-            Mode.WAVE to "👋 Взмах — резко проведи рукой вверх"
+            Mode.WAVE to "👋 Взмах — резко проведи рукой вверх",
+            Mode.WINK to "😉 Подмигивание — закрой один глаз"
         )
         val saved = prefs.getString(CameraService.KEY_MODE, Mode.FIST)
         for ((mode, title) in options) {
@@ -133,7 +134,8 @@ class MainActivity : Activity() {
         status = text("Остановлено", 18f, true).apply { gravity = Gravity.CENTER }
         status.setPadding(0, dp(20), 0, dp(4))
         root.addView(status)
-        root.addView(text("Держи руку в 20–40 см от фронтальной камеры, чтобы вся ладонь была в кадре. " +
+        root.addView(text("Для жестов рукой держи руку в 20–40 см от фронтальной камеры, чтобы вся ладонь была в кадре. " +
+            "Для подмигивания лицо должно быть в кадре, закрывай один глаз на долю секунды, второй держи открытым. " +
             "Телефон лучше держать вертикально."))
     }
 

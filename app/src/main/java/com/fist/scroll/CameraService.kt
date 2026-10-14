@@ -28,6 +28,7 @@ import android.os.SystemClock
 import com.google.mediapipe.framework.image.BitmapImageBuilder
 import com.google.mediapipe.tasks.core.BaseOptions
 import com.google.mediapipe.tasks.vision.core.RunningMode
+import com.google.mediapipe.tasks.vision.facelandmarker.FaceLandmarker
 import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarker
 import java.nio.ByteBuffer
 
@@ -59,7 +60,8 @@ class CameraService : Service() {
     private var thread: HandlerThread? = null
     private var handler: Handler? = null
 
-    private var landmarker: HandLandmarker? = null
+    private var handLm: HandLandmarker? = null
+    private var faceLm: FaceLandmarker? = null
     private var camera: CameraDevice? = null
     private var session: CameraCaptureSession? = null
     private var reader: ImageReader? = null
@@ -86,7 +88,8 @@ class CameraService : Service() {
         handler = Handler(thread!!.looper)
         handler!!.post {
             try {
-                loadModel()
+                val mode = getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY_MODE, Mode.FIST)
+                if (mode == Mode.WINK) createFace().also { faceLm = it } else createHand().also { handLm = it }
                 openCamera()
             } catch (e: Throwable) {
                 publish("Ошибка: ${e.message ?: e.javaClass.simpleName}")
@@ -121,22 +124,54 @@ class CameraService : Service() {
     }
 
     /** Модель читаем из assets в память: так обходится ошибка «doesn't have a slash in it». */
-    private fun loadModel() {
-        val bytes = assets.open("hand_landmarker.task").use { it.readBytes() }
+    private fun modelBuffer(name: String): ByteBuffer {
+        val bytes = assets.open(name).use { it.readBytes() }
         val buffer = ByteBuffer.allocateDirect(bytes.size)
         buffer.put(bytes)
         buffer.rewind()
+        return buffer
+    }
 
-        val base = BaseOptions.builder().setModelAssetBuffer(buffer).build()
+    private fun createHand(): HandLandmarker {
+        val base = BaseOptions.builder().setModelAssetBuffer(modelBuffer("hand_landmarker.task")).build()
         val options = HandLandmarker.HandLandmarkerOptions.builder()
             .setBaseOptions(base)
             .setRunningMode(RunningMode.VIDEO)
             .setNumHands(1)
-            .setMinHandDetectionConfidence(0.5f)
-            .setMinHandPresenceConfidence(0.5f)
-            .setMinTrackingConfidence(0.5f)
+            .setMinHandDetectionConfidence(0.4f)
+            .setMinHandPresenceConfidence(0.4f)
+            .setMinTrackingConfidence(0.4f)
             .build()
-        landmarker = HandLandmarker.createFromOptions(this, options)
+        return HandLandmarker.createFromOptions(this, options)
+    }
+
+    private fun createFace(): FaceLandmarker {
+        val base = BaseOptions.builder().setModelAssetBuffer(modelBuffer("face_landmarker.task")).build()
+        val options = FaceLandmarker.FaceLandmarkerOptions.builder()
+            .setBaseOptions(base)
+            .setRunningMode(RunningMode.VIDEO)
+            .setNumFaces(1)
+            .setOutputFaceBlendshapes(true)
+            .setMinFaceDetectionConfidence(0.4f)
+            .setMinFacePresenceConfidence(0.4f)
+            .setMinTrackingConfidence(0.4f)
+            .build()
+        return FaceLandmarker.createFromOptions(this, options)
+    }
+
+    private fun fail(e: Throwable) {
+        publish("Ошибка: ${e.message ?: e.javaClass.simpleName}")
+        main.post { stopSelf() }
+    }
+
+    private fun ensureHand(): HandLandmarker? {
+        handLm?.let { return it }
+        return try { createHand().also { handLm = it } } catch (e: Throwable) { fail(e); null }
+    }
+
+    private fun ensureFace(): FaceLandmarker? {
+        faceLm?.let { return it }
+        return try { createFace().also { faceLm = it } } catch (e: Throwable) { fail(e); null }
     }
 
     @SuppressLint("MissingPermission")
@@ -209,22 +244,53 @@ class CameraService : Service() {
 
     private fun onFrame(r: ImageReader) {
         val image = r.acquireLatestImage() ?: return
+        var bitmap: Bitmap? = null
         try {
             val now = SystemClock.uptimeMillis()
             if (now - lastFrame < 60) return // не чаще ~15 кадров/с, экономим батарею
             lastFrame = now
 
-            val lm = landmarker ?: return
-            val bitmap = toBitmap(image)
-            val result = lm.detectForVideo(BitmapImageBuilder(bitmap).build(), now)
-            val hand = result.landmarks().firstOrNull()
-
             val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
             val mode = prefs.getString(KEY_MODE, Mode.FIST) ?: Mode.FIST
             val sens = prefs.getInt(KEY_SENS, 5)
 
-            val fire = engine.update(hand, bitmap.width, bitmap.height, now, mode, sens)
-            var text = "Вижу: ${engine.lastPose.title}"
+            val bmp = toBitmap(image)
+            bitmap = bmp
+            val mp = BitmapImageBuilder(bmp).build()
+
+            var text: String
+            val fire: Boolean
+            if (mode == Mode.WINK) {
+                val fl = ensureFace() ?: return
+                val res = fl.detectForVideo(mp, now)
+                var left = 0f
+                var right = 0f
+                var has = false
+                val opt = res.faceBlendshapes()
+                if (opt.isPresent) {
+                    val cats = opt.get().firstOrNull()
+                    if (cats != null) {
+                        has = true
+                        for (c in cats) {
+                            when (c.categoryName()) {
+                                "eyeBlinkLeft" -> left = c.score()
+                                "eyeBlinkRight" -> right = c.score()
+                            }
+                        }
+                    }
+                }
+                fire = engine.updateWink(has, left, right, now, sens)
+                text = if (!has) "Лицо не видно"
+                else "Глаза закрыты: ${(left * 100).toInt()}% и ${(right * 100).toInt()}%"
+            } else {
+                val hl = ensureHand() ?: return
+                val res = hl.detectForVideo(mp, now)
+                val hand = res.landmarks().firstOrNull()
+                val world = res.worldLandmarks().firstOrNull()
+                fire = engine.updateHand(hand, world, bmp.width, bmp.height, now, mode, sens)
+                text = "Вижу: ${engine.lastPose.title}${engine.lastDetail}"
+            }
+
             if (fire) {
                 val svc = SwipeService.instance
                 text = if (svc == null) {
@@ -236,10 +302,10 @@ class CameraService : Service() {
                 }
             }
             publish(text)
-            bitmap.recycle()
         } catch (e: Throwable) {
             publish("Ошибка: ${e.message ?: e.javaClass.simpleName}")
         } finally {
+            bitmap?.recycle()
             image.close()
         }
     }
@@ -292,7 +358,8 @@ class CameraService : Service() {
         try { session?.close() } catch (_: Throwable) {}
         try { camera?.close() } catch (_: Throwable) {}
         try { reader?.close() } catch (_: Throwable) {}
-        try { landmarker?.close() } catch (_: Throwable) {}
+        try { handLm?.close() } catch (_: Throwable) {}
+        try { faceLm?.close() } catch (_: Throwable) {}
         thread?.quitSafely()
         lastStatus = "Остановлено"
         main.post { statusListener?.invoke("Остановлено") }
