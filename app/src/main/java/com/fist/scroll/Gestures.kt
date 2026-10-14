@@ -117,6 +117,25 @@ class GestureEngine {
         return null
     }
 
+    /** Общая логика: жест должен продержаться пару кадров, потом его надо «отпустить». */
+    private fun hold(match: Boolean, need: Int, now: Long): Boolean {
+        var fire = false
+        if (match) {
+            holdFrames++
+            releaseFrames = 0
+            if (holdFrames >= need && armed && now - lastTrigger > 1000) {
+                fire = true
+                armed = false
+                lastTrigger = now
+            }
+        } else {
+            holdFrames = 0
+            releaseFrames++
+            if (releaseFrames >= 3) armed = true
+        }
+        return fire
+    }
+
     /** Режимы с рукой: кулак, два пальца, взмах. Возвращает true, если пора листать. */
     fun updateHand(
         lm: List<NormalizedLandmark>?,
