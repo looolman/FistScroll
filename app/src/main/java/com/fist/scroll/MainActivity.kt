@@ -1,0 +1,184 @@
+package com.fist.scroll
+
+import android.Manifest
+import android.app.Activity
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.graphics.Color
+import android.graphics.Typeface
+import android.os.Build
+import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.provider.Settings
+import android.view.Gravity
+import android.view.View
+import android.widget.Button
+import android.widget.LinearLayout
+import android.widget.RadioButton
+import android.widget.RadioGroup
+import android.widget.ScrollView
+import android.widget.SeekBar
+import android.widget.TextView
+import android.widget.Toast
+
+class MainActivity : Activity() {
+
+    private lateinit var status: TextView
+    private lateinit var access: TextView
+    private lateinit var startBtn: Button
+    private val main = Handler(Looper.getMainLooper())
+
+    private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+
+    private fun text(s: String, size: Float = 16f, bold: Boolean = false) = TextView(this).apply {
+        text = s
+        textSize = size
+        setTextColor(Color.parseColor("#202124"))
+        if (bold) setTypeface(typeface, Typeface.BOLD)
+        setPadding(0, dp(8), 0, dp(4))
+    }
+
+    private fun button(s: String, onClick: () -> Unit) = Button(this).apply {
+        text = s
+        isAllCaps = false
+        setOnClickListener { onClick() }
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        val prefs = getSharedPreferences(CameraService.PREFS, MODE_PRIVATE)
+
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(20), dp(20), dp(32))
+        }
+        val scroll = ScrollView(this).apply {
+            fitsSystemWindows = true
+            setBackgroundColor(Color.WHITE)
+            addView(root)
+        }
+        setContentView(scroll)
+
+        root.addView(text("FistScroll", 28f, true))
+        root.addView(text("Листай TikTok жестом, не касаясь экрана."))
+
+        // ---- выбор жеста ----
+        root.addView(text("Как будешь листать?", 18f, true))
+        val group = RadioGroup(this).apply { orientation = RadioGroup.VERTICAL }
+        val options = listOf(
+            Mode.FIST to "✊ Кулак — сожми руку перед камерой",
+            Mode.TWO to "✌ Два пальца — покажи знак V",
+            Mode.WAVE to "👋 Взмах — резко проведи рукой вверх"
+        )
+        val saved = prefs.getString(CameraService.KEY_MODE, Mode.FIST)
+        for ((mode, title) in options) {
+            val rb = RadioButton(this).apply {
+                id = View.generateViewId()
+                text = title
+                textSize = 16f
+                tag = mode
+                isChecked = mode == saved
+            }
+            group.addView(rb)
+        }
+        group.setOnCheckedChangeListener { g, checkedId ->
+            val mode = g.findViewById<RadioButton>(checkedId).tag as String
+            prefs.edit().putString(CameraService.KEY_MODE, mode).apply()
+        }
+        root.addView(group)
+
+        // ---- чувствительность ----
+        root.addView(text("Чувствительность", 18f, true))
+        val sensLabel = text("")
+        val sens = SeekBar(this).apply {
+            max = 9 // 0..9 => 1..10
+            progress = prefs.getInt(CameraService.KEY_SENS, 5) - 1
+        }
+        sensLabel.text = "Сейчас: ${sens.progress + 1} из 10 (больше = легче срабатывает)"
+        sens.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(s: SeekBar?, p: Int, fromUser: Boolean) {
+                prefs.edit().putInt(CameraService.KEY_SENS, p + 1).apply()
+                sensLabel.text = "Сейчас: ${p + 1} из 10 (больше = легче срабатывает)"
+            }
+            override fun onStartTrackingTouch(s: SeekBar?) {}
+            override fun onStopTrackingTouch(s: SeekBar?) {}
+        })
+        root.addView(sensLabel)
+        root.addView(sens)
+
+        // ---- шаги настройки ----
+        root.addView(text("Настройка", 18f, true))
+        root.addView(button("1. Разрешить камеру") { askPermissions() })
+        root.addView(button("2. Включить службу «специальных возможностей»") {
+            startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+            Toast.makeText(this, "Найди FistScroll и включи его", Toast.LENGTH_LONG).show()
+        })
+        access = text("")
+        root.addView(access)
+
+        startBtn = button("3. Старт") { toggle() }
+        root.addView(startBtn)
+
+        root.addView(button("Проверить свайп (через 4 секунды)") {
+            val svc = SwipeService.instance
+            if (svc == null) {
+                Toast.makeText(this, "Сначала включи службу (шаг 2)", Toast.LENGTH_LONG).show()
+            } else {
+                Toast.makeText(this, "Открой TikTok — свайп сейчас будет", Toast.LENGTH_SHORT).show()
+                main.postDelayed({ SwipeService.instance?.swipeUp() }, 4000)
+            }
+        })
+
+        status = text("Остановлено", 18f, true).apply { gravity = Gravity.CENTER }
+        status.setPadding(0, dp(20), 0, dp(4))
+        root.addView(status)
+        root.addView(text("Держи руку в 20–40 см от фронтальной камеры, чтобы вся ладонь была в кадре. " +
+            "Телефон лучше держать вертикально."))
+    }
+
+    override fun onResume() {
+        super.onResume()
+        CameraService.statusListener = { status.text = it; refresh() }
+        status.text = CameraService.lastStatus
+        refresh()
+    }
+
+    override fun onPause() {
+        CameraService.statusListener = null
+        super.onPause()
+    }
+
+    private fun refresh() {
+        val on = SwipeService.instance != null
+        access.text = if (on) "✅ Служба спец. возможностей включена" else "❌ Служба спец. возможностей выключена"
+        access.setTextColor(Color.parseColor(if (on) "#1e7e34" else "#b3261e"))
+        startBtn.text = if (CameraService.running) "3. Стоп" else "3. Старт"
+    }
+
+    private fun askPermissions() {
+        val list = ArrayList<String>()
+        list.add(Manifest.permission.CAMERA)
+        if (Build.VERSION.SDK_INT >= 33) list.add(Manifest.permission.POST_NOTIFICATIONS)
+        requestPermissions(list.toTypedArray(), 1)
+    }
+
+    private fun toggle() {
+        if (CameraService.running) {
+            startService(Intent(this, CameraService::class.java).setAction(CameraService.ACTION_STOP))
+            main.postDelayed({ refresh() }, 300)
+            return
+        }
+        if (checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+            askPermissions()
+            Toast.makeText(this, "Сначала разреши камеру", Toast.LENGTH_LONG).show()
+            return
+        }
+        if (SwipeService.instance == null) {
+            Toast.makeText(this, "Не забудь включить службу (шаг 2), иначе свайпов не будет", Toast.LENGTH_LONG).show()
+        }
+        val i = Intent(this, CameraService::class.java)
+        if (Build.VERSION.SDK_INT >= 26) startForegroundService(i) else startService(i)
+        main.postDelayed({ refresh() }, 300)
+    }
+}

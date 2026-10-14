@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="fs_service_desc">Делает свайп вверх, когда камера видит выбранный жест.</string>
+</resources>
