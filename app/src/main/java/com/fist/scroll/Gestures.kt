@@ -51,8 +51,8 @@ class GestureEngine {
         intArrayOf(17, 18, 19, 20)
     )
     // запуск приложений жестом
-    private var launchHeld: Pose? = null
-    private var launchSince = 0L
+    private class Seen(val t: Long, val pose: Pose)
+    private val launchSeen = ArrayList<Seen>()
     private var launchLastSeen = 0L
     private var launchArmed = true
     private var lastLaunch = 0L
@@ -83,8 +83,7 @@ class GestureEngine {
             armed = true
             trail.clear()
             fingerInit = false
-            launchHeld = null
-            launchSince = 0L
+            launchSeen.clear()
             launchLastSeen = 0L
             launchArmed = true
             winkFrames.clear()
@@ -92,27 +91,37 @@ class GestureEngine {
         }
     }
 
-    /** Один/два пальца должны продержаться ~0,35 с, после запуска жест нужно опустить. */
-    private fun checkLaunch(pose: Pose, mode: String, now: Long): Pose? {
+    /**
+     * Запуск приложения: один/два пальца должны уверенно держаться в кадре (~0,3–1 с, зависит
+     * от чувствительности). Кадры копятся в окне 1,5 с, поэтому короткий сбой распознавания
+     * не сбрасывает отсчёт. После запуска жест нужно опустить, пауза между запусками 1,5 с.
+     */
+    private fun checkLaunch(pose: Pose, mode: String, now: Long, sensitivity: Int): Pose? {
         val candidate = when {
             pose == Pose.ONE -> Pose.ONE
             pose == Pose.TWO && mode != Mode.TWO -> Pose.TWO
             else -> null
         }
-        if (candidate == null) {
-            launchHeld = null
-            if (now - launchLastSeen > 300) launchArmed = true
-            return null
+        if (candidate != null) {
+            launchSeen.add(Seen(now, candidate))
+            launchLastSeen = now
         }
-        launchLastSeen = now
-        if (candidate != launchHeld) {
-            launchHeld = candidate
-            launchSince = now
-        }
-        if (launchArmed && now - launchSince >= 350 && now - lastLaunch > 3000) {
-            launchArmed = false
-            lastLaunch = now
-            return candidate
+        while (launchSeen.isNotEmpty() && now - launchSeen[0].t > 1500) launchSeen.removeAt(0)
+        if (candidate == null && now - launchLastSeen > 600) launchArmed = true
+        if (!launchArmed || now - lastLaunch < 1500) return null
+
+        val holdMs = 1100 - 80 * sensitivity // чувствительность 5 -> 0,7 с, 10 -> 0,3 с
+        for (p in arrayOf(Pose.ONE, Pose.TWO)) {
+            val xs = launchSeen.filter { it.pose == p }
+            val others = launchSeen.size - xs.size
+            if (xs.size >= 3 && xs.size > others &&
+                now - xs[0].t >= holdMs && now - xs[xs.size - 1].t < 300
+            ) {
+                launchArmed = false
+                lastLaunch = now
+                launchSeen.clear()
+                return p
+            }
         }
         return null
     }
@@ -162,7 +171,7 @@ class GestureEngine {
         } else {
             lastPose = classify(pts)
         }
-        launchPose = if (launchEnabled) checkLaunch(lastPose, mode, now) else null
+        launchPose = if (launchEnabled) checkLaunch(lastPose, mode, now, sensitivity) else null
 
         if (mode == Mode.WAVE) {
             val fire = updateWave(lm, now, sensitivity) && now - lastTrigger > 1000
@@ -182,7 +191,14 @@ class GestureEngine {
      * Только запуск приложений по пальцам: используется в режиме подмигивания,
      * где свайп делается глазом, а руку мы смотрим лишь для запуска. Режим не сбрасывает.
      */
-    fun updateLaunchOnly(lm: List<NormalizedLandmark>?, world: List<Landmark>?, w: Int, h: Int, now: Long) {
+    fun updateLaunchOnly(
+        lm: List<NormalizedLandmark>?,
+        world: List<Landmark>?,
+        w: Int,
+        h: Int,
+        now: Long,
+        sensitivity: Int
+    ) {
         val pts: List<P>? = when {
             world != null && world.size >= 21 -> world.map { P(it.x(), it.y(), it.z()) }
             lm != null && lm.size >= 21 -> lm.map { P(it.x() * w, it.y() * h, it.z() * w) }
@@ -195,7 +211,7 @@ class GestureEngine {
         } else {
             lastPose = classify(pts)
         }
-        launchPose = checkLaunch(lastPose, Mode.WINK, now)
+        launchPose = checkLaunch(lastPose, Mode.WINK, now, sensitivity)
     }
 
     var lastFace = false
@@ -267,6 +283,13 @@ class GestureEngine {
         return dy < -threshold && abs(dx) < abs(dy) * 1.3f
     }
 
+    private fun dist(a: P, b: P): Float {
+        val dx = a.x - b.x
+        val dy = a.y - b.y
+        val dz = a.z - b.z
+        return sqrt(dx * dx + dy * dy + dz * dz)
+    }
+
     /** Угол в точке b между отрезками b-a и b-c, в градусах (180 = прямой палец). */
     private fun angle(a: P, b: P, c: P): Float {
         val ux = a.x - b.x
@@ -288,6 +311,9 @@ class GestureEngine {
             val aPip = angle(p[f[0]], p[f[1]], p[f[2]])
             val aDip = angle(p[f[1]], p[f[2]], p[f[3]])
             val m = 0.65f * aPip + 0.35f * aDip
+            // длина «запястье → кончик» относительно «запястье → основание пальца»:
+            // у прямого пальца ~1,8, у согнутого ~1,1–1,3
+            val reach = dist(p[0], p[f[3]]) / max(dist(p[0], p[f[0]]), 1e-6f)
             if (!fingerInit) {
                 smooth[i] = m
                 ext[i] = m > 140f
@@ -296,6 +322,8 @@ class GestureEngine {
                 // гистерезис: между 125 и 155 палец остаётся в прежнем состоянии
                 if (smooth[i] > 155f) ext[i] = true
                 else if (smooth[i] < 125f) ext[i] = false
+                else if (reach > 1.6f) ext[i] = true   // спорная зона угла: решает расстояние
+                else if (reach < 1.4f) ext[i] = false
             }
         }
         fingerInit = true

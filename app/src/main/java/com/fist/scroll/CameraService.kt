@@ -143,9 +143,9 @@ class CameraService : Service() {
             .setBaseOptions(base)
             .setRunningMode(RunningMode.VIDEO)
             .setNumHands(1)
-            .setMinHandDetectionConfidence(0.4f)
-            .setMinHandPresenceConfidence(0.4f)
-            .setMinTrackingConfidence(0.4f)
+            .setMinHandDetectionConfidence(0.35f)
+            .setMinHandPresenceConfidence(0.35f)
+            .setMinTrackingConfidence(0.35f)
             .build()
         return HandLandmarker.createFromOptions(this, options)
     }
@@ -289,15 +289,15 @@ class CameraService : Service() {
                 text = if (!has) "Лицо не видно"
                 else "Глаза закрыты: ${(left * 100).toInt()}% и ${(right * 100).toInt()}%"
 
-                // пальцы для запуска приложений: смотрим руку реже (~11 раз/с), свайп при этом глазом
+                // пальцы для запуска приложений: смотрим руку реже (~15 раз/с), свайп при этом глазом
                 if (prefs.getBoolean(KEY_LAUNCH, false)) {
-                    if (now - lastHandRun >= 90) {
+                    if (now - lastHandRun >= 60) {
                         lastHandRun = now
                         val hl = ensureHand() ?: return
                         val hres = hl.detectForVideo(mp, now)
                         engine.updateLaunchOnly(
                             hres.landmarks().firstOrNull(), hres.worldLandmarks().firstOrNull(),
-                            bmp.width, bmp.height, now
+                            bmp.width, bmp.height, now, sens
                         )
                         val lp = engine.launchPose
                         if (lp != null) doLaunch(lp, prefs)?.let { launchText = it }
