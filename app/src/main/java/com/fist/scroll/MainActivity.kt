@@ -13,12 +13,16 @@ import android.os.Looper
 import android.provider.Settings
 import android.view.Gravity
 import android.view.View
+import android.widget.AdapterView
+import android.widget.ArrayAdapter
 import android.widget.Button
+import android.widget.CheckBox
 import android.widget.LinearLayout
 import android.widget.RadioButton
 import android.widget.RadioGroup
 import android.widget.ScrollView
 import android.widget.SeekBar
+import android.widget.Spinner
 import android.widget.TextView
 import android.widget.Toast
 
@@ -107,6 +111,62 @@ class MainActivity : Activity() {
         })
         root.addView(sensLabel)
         root.addView(sens)
+
+        // ---- запуск приложений жестом ----
+        root.addView(text("Запуск приложений жестом", 18f, true))
+        val launchCheck = CheckBox(this).apply {
+            text = "Открывать приложения жестом: ☝ один палец и ✌ два пальца. " +
+                "Работает вместе с кулаком и взмахом, но не с подмигиванием."
+            textSize = 15f
+            isChecked = prefs.getBoolean(CameraService.KEY_LAUNCH, false)
+            setOnCheckedChangeListener { _, on ->
+                prefs.edit().putBoolean(CameraService.KEY_LAUNCH, on).apply()
+            }
+        }
+        root.addView(launchCheck)
+
+        val pm = packageManager
+        val apps = pm.queryIntentActivities(
+            Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER), 0
+        )
+            .map { it.loadLabel(pm).toString() to it.activityInfo.packageName }
+            .filter { it.second != packageName }
+            .distinctBy { it.second }
+            .sortedBy { it.first.lowercase() }
+        val items = listOf("— ничего —" to "") + apps
+
+        fun picker(title: String, key: String, known: List<String>) {
+            root.addView(text(title, 16f))
+            val spinner = Spinner(this)
+            spinner.adapter = ArrayAdapter(
+                this, android.R.layout.simple_spinner_dropdown_item, items.map { it.first }
+            )
+            var pkg = prefs.getString(key, null)
+            if (pkg == null) {
+                pkg = items.firstOrNull { it.second in known }?.second ?: ""
+                prefs.edit().putString(key, pkg).apply()
+            }
+            spinner.setSelection(items.indexOfFirst { it.second == pkg }.coerceAtLeast(0))
+            spinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+                override fun onItemSelected(p: AdapterView<*>?, v: View?, pos: Int, id: Long) {
+                    prefs.edit().putString(key, items[pos].second).apply()
+                }
+
+                override fun onNothingSelected(p: AdapterView<*>?) {}
+            }
+            root.addView(spinner)
+        }
+        picker(
+            "☝ Один палец открывает:", CameraService.KEY_APP_ONE,
+            listOf("org.telegram.messenger", "org.telegram.messenger.web", "org.thunderdog.challegram")
+        )
+        picker(
+            "✌ Два пальца открывают:", CameraService.KEY_APP_TWO,
+            listOf("com.zhiliaoapp.musically", "com.ss.android.ugc.trill", "com.zhiliaoapp.musically.go")
+        )
+        root.addView(text("Держи палец(ы) примерно треть секунды. Если приложение не открывается: " +
+            "Настройки → Приложения → FistScroll → Другие разрешения → " +
+            "«Всплывающие окна в фоновом режиме» → Разрешить."))
 
         // ---- шаги настройки ----
         root.addView(text("Настройка", 18f, true))

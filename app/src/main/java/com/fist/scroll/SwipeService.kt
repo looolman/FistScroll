@@ -2,6 +2,7 @@ package com.fist.scroll
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
+import android.content.Intent
 import android.graphics.Path
 import android.view.accessibility.AccessibilityEvent
 
@@ -18,7 +19,7 @@ class SwipeService : AccessibilityService() {
         instance = this
     }
 
-    override fun onUnbind(intent: android.content.Intent?): Boolean {
+    override fun onUnbind(intent: Intent?): Boolean {
         instance = null
         return super.onUnbind(intent)
     }
@@ -31,6 +32,18 @@ class SwipeService : AccessibilityService() {
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
 
     override fun onInterrupt() {}
+
+    /** Открывает приложение по имени пакета. */
+    fun openApp(pkg: String): Boolean {
+        val intent = packageManager.getLaunchIntentForPackage(pkg) ?: return false
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        return try {
+            startActivity(intent)
+            true
+        } catch (e: Throwable) {
+            false
+        }
+    }
 
     /** Свайп снизу вверх по центру экрана = следующее видео. */
     fun swipeUp(): Boolean {

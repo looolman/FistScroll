@@ -42,6 +42,9 @@ class CameraService : Service() {
         const val PREFS = "fist_prefs"
         const val KEY_MODE = "mode"
         const val KEY_SENS = "sens"
+        const val KEY_LAUNCH = "launch_on"
+        const val KEY_APP_ONE = "app_one"
+        const val KEY_APP_TWO = "app_two"
         const val ACTION_STOP = "com.fist.scroll.STOP"
         private const val CHANNEL = "fist_scroll"
 
@@ -287,8 +290,24 @@ class CameraService : Service() {
                 val res = hl.detectForVideo(mp, now)
                 val hand = res.landmarks().firstOrNull()
                 val world = res.worldLandmarks().firstOrNull()
-                fire = engine.updateHand(hand, world, bmp.width, bmp.height, now, mode, sens)
+                val launchOn = prefs.getBoolean(KEY_LAUNCH, false)
+                fire = engine.updateHand(hand, world, bmp.width, bmp.height, now, mode, sens, launchOn)
                 text = "Вижу: ${engine.lastPose.title}${engine.lastDetail}"
+
+                val lp = engine.launchPose
+                if (lp != null) {
+                    val pkg = prefs.getString(if (lp == Pose.ONE) KEY_APP_ONE else KEY_APP_TWO, "") ?: ""
+                    if (pkg.isNotEmpty()) {
+                        val svc = SwipeService.instance
+                        text = if (svc == null) {
+                            "Служба спец. возможностей выключена!"
+                        } else if (svc.openApp(pkg)) {
+                            "Открываю приложение…"
+                        } else {
+                            "Не открылось: разреши «всплывающие окна в фоне»"
+                        }
+                    }
+                }
             }
 
             if (fire) {

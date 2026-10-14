@@ -17,6 +17,7 @@ object Mode {
 enum class Pose(val title: String) {
     NONE("руки не видно"),
     FIST("кулак"),
+    ONE("один палец"),
     TWO("два пальца"),
     OPEN("открытая ладонь"),
     OTHER("рука")
@@ -47,6 +48,13 @@ class GestureEngine {
         intArrayOf(13, 14, 15, 16),
         intArrayOf(17, 18, 19, 20)
     )
+    // запуск приложений жестом
+    private var launchHeld: Pose? = null
+    private var launchHold = 0
+    private var launchRelease = 99
+    private var launchArmed = true
+    private var lastLaunch = 0L
+
     private val smooth = FloatArray(4)
     private val ext = BooleanArray(4)
     private var fingerInit = false
@@ -54,6 +62,10 @@ class GestureEngine {
     var lastPose = Pose.NONE
         private set
     var lastDetail = ""
+        private set
+
+    /** Если не null — нужно открыть приложение для этого жеста (ONE или TWO). */
+    var launchPose: Pose? = null
         private set
 
     private fun syncMode(m: String) {
@@ -64,7 +76,38 @@ class GestureEngine {
             armed = true
             trail.clear()
             fingerInit = false
+            launchHeld = null
+            launchHold = 0
+            launchRelease = 99
+            launchArmed = true
         }
+    }
+
+    /** Один/два пальца должны продержаться ~0,3 с, после запуска нужно опустить жест. */
+    private fun checkLaunch(pose: Pose, mode: String, now: Long): Pose? {
+        val candidate = when {
+            pose == Pose.ONE -> Pose.ONE
+            pose == Pose.TWO && mode != Mode.TWO -> Pose.TWO
+            else -> null
+        }
+        if (candidate != null && candidate == launchHeld) {
+            launchHold++
+        } else {
+            launchHeld = candidate
+            launchHold = if (candidate != null) 1 else 0
+        }
+        if (candidate == null) {
+            launchRelease++
+            if (launchRelease >= 5) launchArmed = true
+        } else {
+            launchRelease = 0
+        }
+        if (candidate != null && launchHold >= 5 && launchArmed && now - lastLaunch > 3000) {
+            launchArmed = false
+            lastLaunch = now
+            return candidate
+        }
+        return null
     }
 
     /** Общая логика: жест должен продержаться пару кадров, потом его надо «отпустить». */
@@ -94,7 +137,8 @@ class GestureEngine {
         h: Int,
         now: Long,
         mode: String,
-        sensitivity: Int
+        sensitivity: Int,
+        launchEnabled: Boolean
     ): Boolean {
         syncMode(mode)
 
@@ -111,6 +155,7 @@ class GestureEngine {
         } else {
             lastPose = classify(pts)
         }
+        launchPose = if (launchEnabled) checkLaunch(lastPose, mode, now) else null
 
         if (mode == Mode.WAVE) {
             val fire = updateWave(lm, now, sensitivity) && now - lastTrigger > 1000
@@ -213,6 +258,7 @@ class GestureEngine {
         val count = ext.count { it }
         return when {
             count == 0 -> Pose.FIST
+            ext[0] && !ext[1] && !ext[2] && !ext[3] -> Pose.ONE
             ext[0] && ext[1] && !ext[2] && !ext[3] -> Pose.TWO
             count == 4 -> Pose.OPEN
             else -> Pose.OTHER
