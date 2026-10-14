@@ -4,6 +4,8 @@ import com.google.mediapipe.tasks.components.containers.Landmark
 import com.google.mediapipe.tasks.components.containers.NormalizedLandmark
 import kotlin.math.abs
 import kotlin.math.acos
+import kotlin.math.max
+import kotlin.math.min
 import kotlin.math.sqrt
 
 object Mode {
@@ -50,10 +52,15 @@ class GestureEngine {
     )
     // запуск приложений жестом
     private var launchHeld: Pose? = null
-    private var launchHold = 0
-    private var launchRelease = 99
+    private var launchSince = 0L
+    private var launchLastSeen = 0L
     private var launchArmed = true
     private var lastLaunch = 0L
+
+    // подмигивание
+    private val winkFrames = ArrayList<Long>()
+    private var winkArmed = true
+    private var lastWinkSeen = 0L
 
     private val smooth = FloatArray(4)
     private val ext = BooleanArray(4)
@@ -77,56 +84,37 @@ class GestureEngine {
             trail.clear()
             fingerInit = false
             launchHeld = null
-            launchHold = 0
-            launchRelease = 99
+            launchSince = 0L
+            launchLastSeen = 0L
             launchArmed = true
+            winkFrames.clear()
+            winkArmed = true
         }
     }
 
-    /** Один/два пальца должны продержаться ~0,3 с, после запуска нужно опустить жест. */
+    /** Один/два пальца должны продержаться ~0,35 с, после запуска жест нужно опустить. */
     private fun checkLaunch(pose: Pose, mode: String, now: Long): Pose? {
         val candidate = when {
             pose == Pose.ONE -> Pose.ONE
             pose == Pose.TWO && mode != Mode.TWO -> Pose.TWO
             else -> null
         }
-        if (candidate != null && candidate == launchHeld) {
-            launchHold++
-        } else {
-            launchHeld = candidate
-            launchHold = if (candidate != null) 1 else 0
-        }
         if (candidate == null) {
-            launchRelease++
-            if (launchRelease >= 5) launchArmed = true
-        } else {
-            launchRelease = 0
+            launchHeld = null
+            if (now - launchLastSeen > 300) launchArmed = true
+            return null
         }
-        if (candidate != null && launchHold >= 5 && launchArmed && now - lastLaunch > 3000) {
+        launchLastSeen = now
+        if (candidate != launchHeld) {
+            launchHeld = candidate
+            launchSince = now
+        }
+        if (launchArmed && now - launchSince >= 350 && now - lastLaunch > 3000) {
             launchArmed = false
             lastLaunch = now
             return candidate
         }
         return null
-    }
-
-    /** Общая логика: жест должен продержаться пару кадров, потом его надо «отпустить». */
-    private fun hold(match: Boolean, need: Int, now: Long): Boolean {
-        var fire = false
-        if (match) {
-            holdFrames++
-            releaseFrames = 0
-            if (holdFrames >= need && armed && now - lastTrigger > 1000) {
-                fire = true
-                armed = false
-                lastTrigger = now
-            }
-        } else {
-            holdFrames = 0
-            releaseFrames++
-            if (releaseFrames >= 3) armed = true
-        }
-        return fire
     }
 
     /** Режимы с рукой: кулак, два пальца, взмах. Возвращает true, если пора листать. */
@@ -178,17 +166,39 @@ class GestureEngine {
     var lastRight = 0f
         private set
 
-    /** Режим подмигивания: один глаз закрыт, другой открыт. */
+    /**
+     * Подмигивание: один глаз закрыт заметно сильнее другого.
+     * Сравниваем глаза между собой (а не с жёстким порогом), потому что при подмигивании
+     * второй глаз обычно тоже немного щурится. Кадры с подмигиванием копятся в окне 0,35 с,
+     * так что единичный пропущенный кадр не мешает.
+     */
     fun updateWink(hasFace: Boolean, left: Float, right: Float, now: Long, sensitivity: Int): Boolean {
         syncMode(Mode.WINK)
         lastFace = hasFace
         lastLeft = left
         lastRight = right
-        val closed = 0.75f - 0.04f * sensitivity
-        val open = 0.30f + 0.02f * sensitivity
-        val wink = hasFace &&
-            ((left > closed && right < open) || (right > closed && left < open))
-        return hold(wink, if (sensitivity >= 8) 2 else 3, now)
+
+        val diffMin = 0.45f - 0.03f * sensitivity     // насколько один глаз должен быть закрыт сильнее
+        val closedMin = 0.45f - 0.025f * sensitivity  // минимальная закрытость «подмигивающего» глаза
+        val hi = max(left, right)
+        val lo = min(left, right)
+        val wink = hasFace && hi > closedMin && (hi - lo) > diffMin && lo < 0.5f
+
+        if (wink) {
+            winkFrames.add(now)
+            lastWinkSeen = now
+        }
+        while (winkFrames.isNotEmpty() && now - winkFrames[0] > 350) winkFrames.removeAt(0)
+        if (!wink && now - lastWinkSeen > 400) winkArmed = true
+
+        val need = if (sensitivity >= 4) 2 else 3
+        if (winkArmed && winkFrames.size >= need && now - lastTrigger > 900) {
+            winkArmed = false
+            lastTrigger = now
+            winkFrames.clear()
+            return true
+        }
+        return false
     }
 
     private fun updateWave(lm: List<NormalizedLandmark>?, now: Long, sensitivity: Int): Boolean {

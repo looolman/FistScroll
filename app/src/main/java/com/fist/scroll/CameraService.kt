@@ -250,12 +250,12 @@ class CameraService : Service() {
         var bitmap: Bitmap? = null
         try {
             val now = SystemClock.uptimeMillis()
-            if (now - lastFrame < 60) return // не чаще ~15 кадров/с, экономим батарею
-            lastFrame = now
-
             val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
             val mode = prefs.getString(KEY_MODE, Mode.FIST) ?: Mode.FIST
             val sens = prefs.getInt(KEY_SENS, 5)
+            // подмигивание ловим чаще (~30 кадров/с), жесты рукой ~25 кадров/с
+            if (now - lastFrame < (if (mode == Mode.WINK) 30 else 40)) return
+            lastFrame = now
 
             val bmp = toBitmap(image)
             bitmap = bmp
@@ -329,38 +329,44 @@ class CameraService : Service() {
         }
     }
 
-    /** YUV_420_888 -> Bitmap, повёрнутый «головой вверх», как держишь телефон. */
+    /**
+     * YUV_420_888 -> Bitmap, повёрнутый «головой вверх», как держишь телефон.
+     * Берём каждый второй пиксель: модели MediaPipe всё равно уменьшают кадр до ~200 px,
+     * зато обработка в разы быстрее и реакция живее.
+     */
     private fun toBitmap(image: Image): Bitmap {
-        val w = image.width
-        val h = image.height
+        val w2 = image.width / 2
+        val h2 = image.height / 2
         val yP = image.planes[0]
         val uP = image.planes[1]
         val vP = image.planes[2]
         val yBuf = yP.buffer
         val uBuf = uP.buffer
         val vBuf = vP.buffer
-        val out = IntArray(w * h)
+        val out = IntArray(w2 * h2)
 
-        for (j in 0 until h) {
-            val yRow = j * yP.rowStride
-            val uRow = (j shr 1) * uP.rowStride
-            val vRow = (j shr 1) * vP.rowStride
-            for (i in 0 until w) {
-                val y = yBuf.get(yRow + i).toInt() and 0xFF
-                val u = (uBuf.get(uRow + (i shr 1) * uP.pixelStride).toInt() and 0xFF) - 128
-                val v = (vBuf.get(vRow + (i shr 1) * vP.pixelStride).toInt() and 0xFF) - 128
+        for (j in 0 until h2) {
+            val sj = j * 2
+            val yRow = sj * yP.rowStride
+            val uRow = (sj shr 1) * uP.rowStride
+            val vRow = (sj shr 1) * vP.rowStride
+            for (i in 0 until w2) {
+                val si = i * 2
+                val y = yBuf.get(yRow + si).toInt() and 0xFF
+                val u = (uBuf.get(uRow + (si shr 1) * uP.pixelStride).toInt() and 0xFF) - 128
+                val v = (vBuf.get(vRow + (si shr 1) * vP.pixelStride).toInt() and 0xFF) - 128
                 var r = y + (1.402f * v).toInt()
                 var g = y - (0.344f * u + 0.714f * v).toInt()
                 var b = y + (1.772f * u).toInt()
                 if (r < 0) r = 0 else if (r > 255) r = 255
                 if (g < 0) g = 0 else if (g > 255) g = 255
                 if (b < 0) b = 0 else if (b > 255) b = 255
-                out[j * w + i] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
+                out[j * w2 + i] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
             }
         }
-        val raw = Bitmap.createBitmap(out, w, h, Bitmap.Config.ARGB_8888)
+        val raw = Bitmap.createBitmap(out, w2, h2, Bitmap.Config.ARGB_8888)
         val m = Matrix().apply { postRotate(sensorOrientation.toFloat()) }
-        val rotated = Bitmap.createBitmap(raw, 0, 0, w, h, m, true)
+        val rotated = Bitmap.createBitmap(raw, 0, 0, w2, h2, m, true)
         if (rotated !== raw) raw.recycle()
         return rotated
     }
