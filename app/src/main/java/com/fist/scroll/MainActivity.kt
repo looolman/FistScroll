@@ -124,6 +124,18 @@ class MainActivity : Activity() {
         }
         root.addView(brightCheck)
 
+        // ---- экономный режим ----
+        val ecoCheck = CheckBox(this).apply {
+            text = "🔋 Экономный режим: реже смотрит в камеру, меньше нагрузка на телефон и батарею " +
+                "(реакция чуть медленнее)"
+            textSize = 15f
+            isChecked = prefs.getBoolean(CameraService.KEY_ECO, false)
+            setOnCheckedChangeListener { _, on ->
+                prefs.edit().putBoolean(CameraService.KEY_ECO, on).apply()
+            }
+        }
+        root.addView(ecoCheck)
+
         // ---- запуск приложений жестом ----
         root.addView(text("Запуск приложений жестом", 18f, true))
         val launchCheck = CheckBox(this).apply {

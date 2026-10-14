@@ -26,6 +26,8 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.os.IBinder
 import android.os.Looper
+import android.os.PowerManager
+import android.os.Process
 import android.os.SystemClock
 import android.util.Range
 import com.google.mediapipe.framework.image.BitmapImageBuilder
@@ -47,6 +49,7 @@ class CameraService : Service() {
         const val KEY_SENS = "sens"
         const val KEY_LAUNCH = "launch_on"
         const val KEY_BRIGHT = "auto_bright"
+        const val KEY_ECO = "eco"
         const val KEY_APP_ONE = "app_one"
         const val KEY_APP_TWO = "app_two"
         const val ACTION_STOP = "com.fist.scroll.STOP"
@@ -77,6 +80,10 @@ class CameraService : Service() {
     private val engine = GestureEngine()
     private var lastFrame = 0L
     private var lastHandRun = 0L
+    private var lastHandSeen = 0L
+    private var power: PowerManager? = null
+    private var frameBitmap: Bitmap? = null
+    private var pixels: IntArray? = null
 
     // автояркость
     private var requestBuilder: CaptureRequest.Builder? = null
@@ -103,7 +110,8 @@ class CameraService : Service() {
         running = true
         publish("Запуск…")
 
-        thread = HandlerThread("fist-camera").also { it.start() }
+        // пониженный приоритет: приложение на переднем плане (TikTok) всегда важнее нас
+        thread = HandlerThread("fist-camera", 6).also { it.start() }
         handler = Handler(thread!!.looper)
         handler!!.post {
             try {
@@ -209,15 +217,16 @@ class CameraService : Service() {
 
         aeRange = chars.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_RANGE)
         aeStep = chars.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_STEP)?.toFloat() ?: 0.1667f
-        // даём автоэкспозиции право на более длинную выдержку в темноте (но не медленнее ~15 к/с)
+        // камера отдаёт не больше ~15-20 кадров/с: нам больше не нужно, а процессор целее
         fpsRange = chars.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
-            ?.filter { it.upper in 24..30 && it.lower <= 15 }
-            ?.minByOrNull { it.lower }
+            ?.filter { it.upper in 15..20 }
+            ?.maxWithOrNull(compareBy<Range<Int>>({ it.upper }, { -it.lower }))
 
         val sizes = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)!!
             .getOutputSizes(ImageFormat.YUV_420_888)
-        // берём размер, ближайший к 640x480, чтобы было быстро
-        val size = sizes.minByOrNull { Math.abs(it.width * it.height - 640 * 480) }!!
+        // берём маленький кадр (~320x240, формат 4:3): модели всё равно уменьшают его до ~200 px
+        val size = (sizes.filter { it.width * 3 == it.height * 4 }.ifEmpty { sizes.toList() })
+            .minByOrNull { Math.abs(it.width * it.height - 320 * 240) }!!
 
         reader = ImageReader.newInstance(size.width, size.height, ImageFormat.YUV_420_888, 2).also {
             it.setOnImageAvailableListener({ r -> onFrame(r) }, handler)
@@ -271,20 +280,30 @@ class CameraService : Service() {
 
     private fun onFrame(r: ImageReader) {
         val image = r.acquireLatestImage() ?: return
-        var bitmap: Bitmap? = null
         try {
             val now = SystemClock.uptimeMillis()
+
+            // экран выключен — ничего не считаем
+            val pm = power ?: (getSystemService(POWER_SERVICE) as PowerManager).also { power = it }
+            if (!pm.isInteractive) return
+
             val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
             val mode = prefs.getString(KEY_MODE, Mode.FIST) ?: Mode.FIST
             val sens = prefs.getInt(KEY_SENS, 5)
-            // подмигивание ловим чаще (~30 кадров/с), жесты рукой ~25 кадров/с
-            if (now - lastFrame < (if (mode == Mode.WINK) 30 else 40)) return
+            val eco = prefs.getBoolean(KEY_ECO, false)
+
+            // Сколько ждать между обработанными кадрами:
+            //  - подмигивание: ~18 кадров/с
+            //  - жесты рукой: ~18 кадров/с, а если руки нет уже 2 секунды — дежурный режим 4 кадра/с
+            val idle = mode != Mode.WINK && now - lastHandSeen > 2000
+            var gap = if (idle) 250L else 55L
+            if (eco) gap = (gap * 1.8f).toLong()
+            if (now - lastFrame < gap) return
             lastFrame = now
 
             val boost = prefs.getBoolean(KEY_BRIGHT, true)
             val bmp = toBitmap(image, boost)
             adaptExposure(lastMean, now, boost)
-            bitmap = bmp
             val mp = BitmapImageBuilder(bmp).build()
 
             var text: String
@@ -313,9 +332,9 @@ class CameraService : Service() {
                 text = if (!has) "Лицо не видно"
                 else "Глаза закрыты: ${(left * 100).toInt()}% и ${(right * 100).toInt()}%"
 
-                // пальцы для запуска приложений: смотрим руку реже (~15 раз/с), свайп при этом глазом
+                // пальцы для запуска приложений: смотрим руку реже (~8 раз/с), свайп при этом глазом
                 if (prefs.getBoolean(KEY_LAUNCH, false)) {
-                    if (now - lastHandRun >= 60) {
+                    if (now - lastHandRun >= (if (eco) 220 else 130)) {
                         lastHandRun = now
                         val hl = ensureHand() ?: return
                         val hres = hl.detectForVideo(mp, now)
@@ -335,6 +354,7 @@ class CameraService : Service() {
                 val world = res.worldLandmarks().firstOrNull()
                 val launchOn = prefs.getBoolean(KEY_LAUNCH, false)
                 fire = engine.updateHand(hand, world, bmp.width, bmp.height, now, mode, sens, launchOn)
+                if (engine.lastPose != Pose.NONE) lastHandSeen = now
                 text = "Вижу: ${engine.lastPose.title}${engine.lastDetail}"
 
                 val lp = engine.launchPose
@@ -357,7 +377,6 @@ class CameraService : Service() {
         } catch (e: Throwable) {
             publish("Ошибка: ${e.message ?: e.javaClass.simpleName}")
         } finally {
-            bitmap?.recycle()
             image.close()
         }
     }
@@ -399,19 +418,35 @@ class CameraService : Service() {
 
     /**
      * YUV_420_888 -> Bitmap, повёрнутый «головой вверх», как держишь телефон.
-     * Берём каждый второй пиксель: модели MediaPipe всё равно уменьшают кадр до ~200 px,
-     * зато обработка в разы быстрее и реакция живее.
+     * Массив пикселей и Bitmap переиспользуются (меньше работы сборщику мусора, а значит
+     * меньше подтормаживаний), поворот делается прямо при копировании.
      */
     private fun toBitmap(image: Image, boost: Boolean): Bitmap {
-        val w2 = image.width / 2
-        val h2 = image.height / 2
+        val scale = if (image.width >= 560) 2 else 1
+        val sw = image.width / scale
+        val sh = image.height / scale
+        val rot = ((sensorOrientation % 360) + 360) % 360
+        val outW = if (rot == 90 || rot == 270) sh else sw
+        val outH = if (rot == 90 || rot == 270) sw else sh
+
+        var out = pixels
+        if (out == null || out.size != outW * outH) {
+            out = IntArray(outW * outH)
+            pixels = out
+        }
+        var bm = frameBitmap
+        if (bm == null || bm.width != outW || bm.height != outH) {
+            bm?.recycle()
+            bm = Bitmap.createBitmap(outW, outH, Bitmap.Config.ARGB_8888)
+            frameBitmap = bm
+        }
+
         val yP = image.planes[0]
         val uP = image.planes[1]
         val vP = image.planes[2]
         val yBuf = yP.buffer
         val uBuf = uP.buffer
         val vBuf = vP.buffer
-        val out = IntArray(w2 * h2)
 
         // средняя яркость кадра (по редкой сетке) и таблица осветления теней
         var sum = 0L
@@ -441,13 +476,13 @@ class CameraService : Service() {
             else (255.0 * Math.pow(i / 255.0, gammaSmooth.toDouble())).toInt().coerceIn(0, 255)
         }
 
-        for (j in 0 until h2) {
-            val sj = j * 2
+        for (j in 0 until sh) {
+            val sj = j * scale
             val yRow = sj * yP.rowStride
             val uRow = (sj shr 1) * uP.rowStride
             val vRow = (sj shr 1) * vP.rowStride
-            for (i in 0 until w2) {
-                val si = i * 2
+            for (i in 0 until sw) {
+                val si = i * scale
                 val y = lut[yBuf.get(yRow + si).toInt() and 0xFF]
                 val u = (uBuf.get(uRow + (si shr 1) * uP.pixelStride).toInt() and 0xFF) - 128
                 val v = (vBuf.get(vRow + (si shr 1) * vP.pixelStride).toInt() and 0xFF) - 128
@@ -457,14 +492,19 @@ class CameraService : Service() {
                 if (r < 0) r = 0 else if (r > 255) r = 255
                 if (g < 0) g = 0 else if (g > 255) g = 255
                 if (b < 0) b = 0 else if (b > 255) b = 255
-                out[j * w2 + i] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
+                val dx: Int
+                val dy: Int
+                when (rot) {
+                    90 -> { dx = sh - 1 - j; dy = i }
+                    180 -> { dx = sw - 1 - i; dy = sh - 1 - j }
+                    270 -> { dx = j; dy = sw - 1 - i }
+                    else -> { dx = i; dy = j }
+                }
+                out[dy * outW + dx] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
             }
         }
-        val raw = Bitmap.createBitmap(out, w2, h2, Bitmap.Config.ARGB_8888)
-        val m = Matrix().apply { postRotate(sensorOrientation.toFloat()) }
-        val rotated = Bitmap.createBitmap(raw, 0, 0, w2, h2, m, true)
-        if (rotated !== raw) raw.recycle()
-        return rotated
+        bm.setPixels(out, 0, outW, 0, 0, outW, outH)
+        return bm
     }
 
     private fun publish(text: String) {
@@ -482,6 +522,8 @@ class CameraService : Service() {
         try { handLm?.close() } catch (_: Throwable) {}
         try { faceLm?.close() } catch (_: Throwable) {}
         thread?.quitSafely()
+        frameBitmap = null
+        pixels = null
         lastStatus = "Остановлено"
         main.post { statusListener?.invoke("Остановлено") }
         super.onDestroy()
