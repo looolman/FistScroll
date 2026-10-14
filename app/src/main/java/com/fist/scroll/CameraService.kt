@@ -18,6 +18,7 @@ import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraDevice
 import android.hardware.camera2.CameraManager
+import android.hardware.camera2.CaptureRequest
 import android.media.Image
 import android.media.ImageReader
 import android.os.Build
@@ -26,6 +27,7 @@ import android.os.HandlerThread
 import android.os.IBinder
 import android.os.Looper
 import android.os.SystemClock
+import android.util.Range
 import com.google.mediapipe.framework.image.BitmapImageBuilder
 import com.google.mediapipe.tasks.core.BaseOptions
 import com.google.mediapipe.tasks.vision.core.RunningMode
@@ -44,6 +46,7 @@ class CameraService : Service() {
         const val KEY_MODE = "mode"
         const val KEY_SENS = "sens"
         const val KEY_LAUNCH = "launch_on"
+        const val KEY_BRIGHT = "auto_bright"
         const val KEY_APP_ONE = "app_one"
         const val KEY_APP_TWO = "app_two"
         const val ACTION_STOP = "com.fist.scroll.STOP"
@@ -74,6 +77,17 @@ class CameraService : Service() {
     private val engine = GestureEngine()
     private var lastFrame = 0L
     private var lastHandRun = 0L
+
+    // автояркость
+    private var requestBuilder: CaptureRequest.Builder? = null
+    private var aeRange: Range<Int>? = null
+    private var aeStep = 0.1667f
+    private var fpsRange: Range<Int>? = null
+    private var expIdx = 0
+    private var lastExpAdjust = 0L
+    private val lut = IntArray(256) { it }
+    private var gammaSmooth = 1f
+    private var lastMean = 128f
     private var lastStatusText = ""
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -193,6 +207,13 @@ class CameraService : Service() {
         val chars = manager.getCameraCharacteristics(id)
         sensorOrientation = chars.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 270
 
+        aeRange = chars.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_RANGE)
+        aeStep = chars.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_STEP)?.toFloat() ?: 0.1667f
+        // даём автоэкспозиции право на более длинную выдержку в темноте (но не медленнее ~15 к/с)
+        fpsRange = chars.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
+            ?.filter { it.upper in 24..30 && it.lower <= 15 }
+            ?.minByOrNull { it.lower }
+
         val sizes = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)!!
             .getOutputSizes(ImageFormat.YUV_420_888)
         // берём размер, ближайший к 640x480, чтобы было быстро
@@ -226,13 +247,14 @@ class CameraService : Service() {
     private fun startSession(device: CameraDevice) {
         try {
             val surface = reader!!.surface
-            val request = device.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
-                addTarget(surface)
-            }.build()
+            val builder = device.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW)
+            builder.addTarget(surface)
+            fpsRange?.let { builder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, it) }
+            requestBuilder = builder
             device.createCaptureSession(listOf(surface), object : CameraCaptureSession.StateCallback() {
                 override fun onConfigured(s: CameraCaptureSession) {
                     session = s
-                    s.setRepeatingRequest(request, null, handler)
+                    s.setRepeatingRequest(builder.build(), null, handler)
                     publish("Жду жест…")
                 }
 
@@ -259,7 +281,9 @@ class CameraService : Service() {
             if (now - lastFrame < (if (mode == Mode.WINK) 30 else 40)) return
             lastFrame = now
 
-            val bmp = toBitmap(image)
+            val boost = prefs.getBoolean(KEY_BRIGHT, true)
+            val bmp = toBitmap(image, boost)
+            adaptExposure(lastMean, now, boost)
             bitmap = bmp
             val mp = BitmapImageBuilder(bmp).build()
 
@@ -328,12 +352,35 @@ class CameraService : Service() {
                 }
             }
             launchText?.let { text = it }
+            if (gammaSmooth < 0.95f || expIdx > 0) text += " ☀"
             publish(text)
         } catch (e: Throwable) {
             publish("Ошибка: ${e.message ?: e.javaClass.simpleName}")
         } finally {
             bitmap?.recycle()
             image.close()
+        }
+    }
+
+    /** Если в кадре темно, просим камеру сделать светлее (+EV); если светло, возвращаем назад. */
+    private fun adaptExposure(mean: Float, now: Long, enabled: Boolean) {
+        val range = aeRange ?: return
+        val builder = requestBuilder ?: return
+        val sess = session ?: return
+        if (now - lastExpAdjust < 700) return
+        val oneEv = Math.max(1, Math.round(1f / aeStep))
+        val cap = Math.min(range.upper, oneEv * 3)
+        var idx = expIdx
+        if (!enabled) idx = 0
+        else if (mean < 85f && idx < cap) idx = Math.min(cap, idx + oneEv)
+        else if (mean > 150f && idx > 0) idx = Math.max(0, idx - oneEv)
+        if (idx == expIdx) return
+        lastExpAdjust = now
+        expIdx = idx
+        try {
+            builder.set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, idx)
+            sess.setRepeatingRequest(builder.build(), null, handler)
+        } catch (_: Throwable) {
         }
     }
 
@@ -355,7 +402,7 @@ class CameraService : Service() {
      * Берём каждый второй пиксель: модели MediaPipe всё равно уменьшают кадр до ~200 px,
      * зато обработка в разы быстрее и реакция живее.
      */
-    private fun toBitmap(image: Image): Bitmap {
+    private fun toBitmap(image: Image, boost: Boolean): Bitmap {
         val w2 = image.width / 2
         val h2 = image.height / 2
         val yP = image.planes[0]
@@ -366,6 +413,34 @@ class CameraService : Service() {
         val vBuf = vP.buffer
         val out = IntArray(w2 * h2)
 
+        // средняя яркость кадра (по редкой сетке) и таблица осветления теней
+        var sum = 0L
+        var n = 0
+        var gy = 0
+        while (gy < image.height) {
+            val row = gy * yP.rowStride
+            var gx = 0
+            while (gx < image.width) {
+                sum += yBuf.get(row + gx).toInt() and 0xFF
+                n++
+                gx += 8
+            }
+            gy += 8
+        }
+        val mean = if (n > 0) sum.toFloat() / n else 128f
+        lastMean = mean
+        var gamma = 1f
+        if (boost && mean < 90f) {
+            // подбираем степень так, чтобы средняя яркость поднялась примерно до 105 из 255
+            val g = (Math.log(105.0 / 255.0) / Math.log(Math.max(mean, 8f) / 255.0)).toFloat()
+            gamma = g.coerceIn(0.4f, 1f)
+        }
+        gammaSmooth = 0.7f * gammaSmooth + 0.3f * gamma
+        for (i in 0..255) {
+            lut[i] = if (gammaSmooth >= 0.98f) i
+            else (255.0 * Math.pow(i / 255.0, gammaSmooth.toDouble())).toInt().coerceIn(0, 255)
+        }
+
         for (j in 0 until h2) {
             val sj = j * 2
             val yRow = sj * yP.rowStride
@@ -373,7 +448,7 @@ class CameraService : Service() {
             val vRow = (sj shr 1) * vP.rowStride
             for (i in 0 until w2) {
                 val si = i * 2
-                val y = yBuf.get(yRow + si).toInt() and 0xFF
+                val y = lut[yBuf.get(yRow + si).toInt() and 0xFF]
                 val u = (uBuf.get(uRow + (si shr 1) * uP.pixelStride).toInt() and 0xFF) - 128
                 val v = (vBuf.get(vRow + (si shr 1) * vP.pixelStride).toInt() and 0xFF) - 128
                 var r = y + (1.402f * v).toInt()

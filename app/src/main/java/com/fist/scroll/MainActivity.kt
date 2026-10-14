@@ -112,6 +112,18 @@ class MainActivity : Activity() {
         root.addView(sensLabel)
         root.addView(sens)
 
+        // ---- автояркость ----
+        val brightCheck = CheckBox(this).apply {
+            text = "☀ Автояркость: если в комнате темно, камера и приложение усиливают картинку, " +
+                "чтобы лучше видеть глаза и руки (в статусе появится ☀)"
+            textSize = 15f
+            isChecked = prefs.getBoolean(CameraService.KEY_BRIGHT, true)
+            setOnCheckedChangeListener { _, on ->
+                prefs.edit().putBoolean(CameraService.KEY_BRIGHT, on).apply()
+            }
+        }
+        root.addView(brightCheck)
+
         // ---- запуск приложений жестом ----
         root.addView(text("Запуск приложений жестом", 18f, true))
         val launchCheck = CheckBox(this).apply {
