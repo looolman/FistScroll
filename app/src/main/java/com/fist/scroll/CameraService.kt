@@ -8,6 +8,7 @@ import android.app.NotificationManager
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.graphics.Bitmap
@@ -72,6 +73,7 @@ class CameraService : Service() {
 
     private val engine = GestureEngine()
     private var lastFrame = 0L
+    private var lastHandRun = 0L
     private var lastStatusText = ""
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -262,6 +264,7 @@ class CameraService : Service() {
             val mp = BitmapImageBuilder(bmp).build()
 
             var text: String
+            var launchText: String? = null
             val fire: Boolean
             if (mode == Mode.WINK) {
                 val fl = ensureFace() ?: return
@@ -285,6 +288,22 @@ class CameraService : Service() {
                 fire = engine.updateWink(has, left, right, now, sens)
                 text = if (!has) "Лицо не видно"
                 else "Глаза закрыты: ${(left * 100).toInt()}% и ${(right * 100).toInt()}%"
+
+                // пальцы для запуска приложений: смотрим руку реже (~11 раз/с), свайп при этом глазом
+                if (prefs.getBoolean(KEY_LAUNCH, false)) {
+                    if (now - lastHandRun >= 90) {
+                        lastHandRun = now
+                        val hl = ensureHand() ?: return
+                        val hres = hl.detectForVideo(mp, now)
+                        engine.updateLaunchOnly(
+                            hres.landmarks().firstOrNull(), hres.worldLandmarks().firstOrNull(),
+                            bmp.width, bmp.height, now
+                        )
+                        val lp = engine.launchPose
+                        if (lp != null) doLaunch(lp, prefs)?.let { launchText = it }
+                    }
+                    text += " | рука: ${engine.lastPose.title}"
+                }
             } else {
                 val hl = ensureHand() ?: return
                 val res = hl.detectForVideo(mp, now)
@@ -295,19 +314,7 @@ class CameraService : Service() {
                 text = "Вижу: ${engine.lastPose.title}${engine.lastDetail}"
 
                 val lp = engine.launchPose
-                if (lp != null) {
-                    val pkg = prefs.getString(if (lp == Pose.ONE) KEY_APP_ONE else KEY_APP_TWO, "") ?: ""
-                    if (pkg.isNotEmpty()) {
-                        val svc = SwipeService.instance
-                        text = if (svc == null) {
-                            "Служба спец. возможностей выключена!"
-                        } else if (svc.openApp(pkg)) {
-                            "Открываю приложение…"
-                        } else {
-                            "Не открылось: разреши «всплывающие окна в фоне»"
-                        }
-                    }
-                }
+                if (lp != null) doLaunch(lp, prefs)?.let { launchText = it }
             }
 
             if (fire) {
@@ -320,12 +327,26 @@ class CameraService : Service() {
                     "Свайп не удался"
                 }
             }
+            launchText?.let { text = it }
             publish(text)
         } catch (e: Throwable) {
             publish("Ошибка: ${e.message ?: e.javaClass.simpleName}")
         } finally {
             bitmap?.recycle()
             image.close()
+        }
+    }
+
+    private fun doLaunch(lp: Pose, prefs: SharedPreferences): String? {
+        val pkg = prefs.getString(if (lp == Pose.ONE) KEY_APP_ONE else KEY_APP_TWO, "") ?: ""
+        if (pkg.isEmpty()) return null
+        val svc = SwipeService.instance
+        return if (svc == null) {
+            "Служба спец. возможностей выключена!"
+        } else if (svc.openApp(pkg)) {
+            "Открываю приложение…"
+        } else {
+            "Не открылось: разреши «всплывающие окна в фоне»"
         }
     }
 

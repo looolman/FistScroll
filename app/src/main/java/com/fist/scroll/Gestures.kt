@@ -178,6 +178,26 @@ class GestureEngine {
         return hold(lastPose == target, need, now)
     }
 
+    /**
+     * Только запуск приложений по пальцам: используется в режиме подмигивания,
+     * где свайп делается глазом, а руку мы смотрим лишь для запуска. Режим не сбрасывает.
+     */
+    fun updateLaunchOnly(lm: List<NormalizedLandmark>?, world: List<Landmark>?, w: Int, h: Int, now: Long) {
+        val pts: List<P>? = when {
+            world != null && world.size >= 21 -> world.map { P(it.x(), it.y(), it.z()) }
+            lm != null && lm.size >= 21 -> lm.map { P(it.x() * w, it.y() * h, it.z() * w) }
+            else -> null
+        }
+        if (pts == null) {
+            fingerInit = false
+            lastPose = Pose.NONE
+            lastDetail = ""
+        } else {
+            lastPose = classify(pts)
+        }
+        launchPose = checkLaunch(lastPose, Mode.WINK, now)
+    }
+
     var lastFace = false
         private set
     var lastLeft = 0f

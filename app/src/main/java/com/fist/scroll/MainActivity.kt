@@ -116,7 +116,8 @@ class MainActivity : Activity() {
         root.addView(text("Запуск приложений жестом", 18f, true))
         val launchCheck = CheckBox(this).apply {
             text = "Открывать приложения жестом: ☝ один палец и ✌ два пальца. " +
-                "Работает вместе с кулаком и взмахом, но не с подмигиванием."
+                "Работает со всеми режимами, в том числе с подмиганием. " +
+                "(В режиме «Два пальца» два пальца листают видео, поэтому открывает приложение только один палец.)"
             textSize = 15f
             isChecked = prefs.getBoolean(CameraService.KEY_LAUNCH, false)
             setOnCheckedChangeListener { _, on ->
