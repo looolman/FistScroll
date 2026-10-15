@@ -53,8 +53,10 @@ class CameraService : Service() {
         const val KEY_THUMB = "thumb_on"
         const val KEY_HINT = "hint_on"
         const val KEY_HINT_POS = "hint_pos"
-        const val KEY_APP_ONE = "app_one"
-        const val KEY_APP_TWO = "app_two"
+        // v2: новые ключи, чтобы применились новые значения по умолчанию (1 = Claude, 2 = TikTok, 3 = Telegram)
+        const val KEY_APP_ONE = "app_one_v2"
+        const val KEY_APP_TWO = "app_two_v2"
+        const val KEY_APP_THREE = "app_three_v2"
         const val ACTION_STOP = "com.fist.scroll.STOP"
         private const val CHANNEL = "fist_scroll"
 
@@ -446,6 +448,7 @@ class CameraService : Service() {
         Pose.FIST -> "✊ кулак"
         Pose.ONE -> "☝ один палец"
         Pose.TWO -> "✌ два пальца"
+        Pose.THREE -> "3️⃣ три пальца"
         Pose.OPEN -> "🖐 открытая ладонь"
         Pose.THUMB -> "👍 палец вверх"
         Pose.OTHER -> "🤚 рука (непонятный жест)"
@@ -492,7 +495,12 @@ class CameraService : Service() {
     }
 
     private fun doLaunch(lp: Pose, prefs: SharedPreferences): String? {
-        val pkg = prefs.getString(if (lp == Pose.ONE) KEY_APP_ONE else KEY_APP_TWO, "") ?: ""
+        val key = when (lp) {
+            Pose.ONE -> KEY_APP_ONE
+            Pose.TWO -> KEY_APP_TWO
+            else -> KEY_APP_THREE
+        }
+        val pkg = prefs.getString(key, "") ?: ""
         if (pkg.isEmpty()) return null
         val svc = SwipeService.instance
         return if (svc == null) {

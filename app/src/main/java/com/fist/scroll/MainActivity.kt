@@ -183,9 +183,9 @@ class MainActivity : Activity() {
         // ---- запуск приложений жестом ----
         root.addView(text("Запуск приложений жестом", 18f, true))
         val launchCheck = CheckBox(this).apply {
-            text = "Открывать приложения жестом: ☝ один палец и ✌ два пальца. " +
-                "Работает со всеми режимами, в том числе с подмиганием. " +
-                "(В режиме «Два пальца» два пальца листают видео, поэтому открывает приложение только один палец.)"
+            text = "Открывать приложения жестом: ☝ один палец, ✌ два пальца, 3️⃣ три пальца " +
+                "(указательный, средний и безымянный). Работает со всеми режимами, в том числе с подмиганием. " +
+                "(В режиме «Два пальца» два пальца листают видео, поэтому его приложение не откроется.)"
             textSize = 15f
             isChecked = prefs.getBoolean(CameraService.KEY_LAUNCH, false)
             setOnCheckedChangeListener { _, on ->
@@ -227,11 +227,15 @@ class MainActivity : Activity() {
         }
         picker(
             "☝ Один палец открывает:", CameraService.KEY_APP_ONE,
-            listOf("org.telegram.messenger", "org.telegram.messenger.web", "org.thunderdog.challegram")
+            listOf("com.anthropic.claude")
         )
         picker(
             "✌ Два пальца открывают:", CameraService.KEY_APP_TWO,
             listOf("com.zhiliaoapp.musically", "com.ss.android.ugc.trill", "com.zhiliaoapp.musically.go")
+        )
+        picker(
+            "3️⃣ Три пальца открывают:", CameraService.KEY_APP_THREE,
+            listOf("org.telegram.messenger", "org.telegram.messenger.web", "org.thunderdog.challegram")
         )
         root.addView(text("Покажи палец(ы) и подержи около секунды (чем выше чувствительность, тем короче). " +
             "После запуска опусти руку, и жест можно повторить через 1,5 секунды. Если приложение не открывается: " +

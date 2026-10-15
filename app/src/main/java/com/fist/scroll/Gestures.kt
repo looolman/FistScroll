@@ -22,6 +22,7 @@ enum class Pose(val title: String) {
     FIST("кулак"),
     ONE("один палец"),
     TWO("два пальца"),
+    THREE("три пальца"),
     OPEN("открытая ладонь"),
     THUMB("палец вверх"),
     OTHER("рука")
@@ -147,6 +148,7 @@ class GestureEngine {
         val candidate = when {
             pose == Pose.ONE -> Pose.ONE
             pose == Pose.TWO && mode != Mode.TWO -> Pose.TWO
+            pose == Pose.THREE -> Pose.THREE
             else -> null
         }
         if (candidate != null) {
@@ -158,7 +160,7 @@ class GestureEngine {
         if (!launchArmed || now - lastLaunch < 1500) return null
 
         val holdMs = 1100 - 80 * sensitivity // чувствительность 5 -> 0,7 с, 10 -> 0,3 с
-        for (p in arrayOf(Pose.ONE, Pose.TWO)) {
+        for (p in arrayOf(Pose.ONE, Pose.TWO, Pose.THREE)) {
             val xs = launchSeen.filter { it.pose == p }
             val others = launchSeen.size - xs.size
             if (xs.size >= 3 && xs.size > others &&
@@ -217,7 +219,7 @@ class GestureEngine {
             lastPose = Pose.NONE
             lastDetail = ""
         } else {
-            lastPose = classify(pts, imageThumbUp(lm, w, h))
+            lastPose = classify(pts, lm, w, h)
         }
         launchPose = if (launchEnabled) checkLaunch(lastPose, mode, now, sensitivity) else null
         thumbFired = if (thumbEnabled) checkThumb(lastPose, now, sensitivity) else false
@@ -260,7 +262,7 @@ class GestureEngine {
             lastPose = Pose.NONE
             lastDetail = ""
         } else {
-            lastPose = classify(pts, imageThumbUp(lm, w, h))
+            lastPose = classify(pts, lm, w, h)
         }
         launchPose = if (launchEnabled) checkLaunch(lastPose, Mode.WINK, now, sensitivity) else null
         thumbFired = if (thumbEnabled) checkThumb(lastPose, now, sensitivity) else false
@@ -404,32 +406,44 @@ class GestureEngine {
         return Math.toDegrees(acos(cos.toDouble())).toFloat()
     }
 
-    /** Смотрит ли большой палец вверх на самом кадре (у кадра ось y направлена вниз). */
-    private fun imageThumbUp(lm: List<NormalizedLandmark>?, w: Int, h: Int): Boolean? {
-        if (lm == null || lm.size < 21) return null
-        val ux = (lm[4].x() - lm[2].x()) * w
-        val uy = (lm[4].y() - lm[2].y()) * h
-        val len = sqrt(ux * ux + uy * uy)
-        if (len < 1e-6f) return null
-        return -uy / len > 0.6f
-    }
-
-    /** Большой палец выпрямлен, отведён от ладони и смотрит вверх (остальные пальцы согнуты). */
-    private fun isThumbUp(p: List<P>, dirUp: Boolean?): Boolean {
+    /**
+     * Большой палец вверх. Три независимых признака (все должны сойтись):
+     *  1) палец выпрямлен: кончик далеко от запястья или оба сустава почти прямые;
+     *  2) он отведён от указательного (в кулаке большой палец прижат);
+     *  3) по самому кадру он смотрит вверх и кончик заметно выше костяшек остальных пальцев.
+     * Третий признак считается по картинке (ось y вниз), он не зависит от «мировых» координат.
+     */
+    private fun isThumbUp(p: List<P>, lm: List<NormalizedLandmark>?, w: Int, h: Int): Boolean {
         val scale = max(dist(p[0], p[9]), 1e-6f)
-        if (angle(p[2], p[3], p[4]) < 145f) return false   // верхний сустав прямой
-        if (angle(p[1], p[2], p[3]) < 135f) return false   // нижний сустав прямой
-        // в кулаке большой палец прижат к указательному, а тут кончик далеко от него
-        if (dist(p[4], p[5]) / scale < 0.9f) return false
-        if (dirUp != null) return dirUp
+        val reach = dist(p[0], p[4]) / scale
+        val straight = angle(p[2], p[3], p[4]) > 140f && angle(p[1], p[2], p[3]) > 130f
+        thumbReach = reach
+        if (!(reach > 1.3f || straight)) return false
+        if (dist(p[4], p[5]) / scale < 0.75f) return false
+
+        if (lm != null && lm.size >= 21) {
+            val ux = (lm[4].x() - lm[2].x()) * w
+            val uy = (lm[4].y() - lm[2].y()) * h
+            val len = sqrt(ux * ux + uy * uy)
+            if (len < 1e-6f || -uy / len < 0.5f) return false
+            val sx = (lm[9].x() - lm[0].x()) * w
+            val sy = (lm[9].y() - lm[0].y()) * h
+            val palm = max(sqrt(sx * sx + sy * sy), 1e-6f)
+            val knuckleTop = min(min(lm[5].y(), lm[9].y()), min(lm[13].y(), lm[17].y())) * h
+            return lm[4].y() * h < knuckleTop - 0.25f * palm
+        }
+        // картинки нет: берём направление по 3D-координатам
         val ux = p[4].x - p[2].x
         val uy = p[4].y - p[2].y
         val uz = p[4].z - p[2].z
         val len = sqrt(ux * ux + uy * uy + uz * uz)
-        return len > 1e-6f && -uy / len > 0.6f
+        return len > 1e-6f && -uy / len > 0.5f
     }
 
-    private fun classify(p: List<P>, thumbDirUp: Boolean?): Pose {
+    /** Для статуса: насколько вытянут большой палец (около 1 = прижат, 1,5+ = отставлен). */
+    private var thumbReach = 0f
+
+    private fun classify(p: List<P>, lm: List<NormalizedLandmark>?, w: Int, h: Int): Pose {
         for (i in 0 until 4) {
             val f = fingers[i]
             val aPip = angle(p[f[0]], p[f[1]], p[f[2]])
@@ -457,14 +471,20 @@ class GestureEngine {
             .let { if (it == " []") " [все согнуты]" else it }
 
         val count = ext.count { it }
-        if (count == 0 && isThumbUp(p, thumbDirUp)) {
+        // «почти кулак»: все пальцы согнуты или один из них согнут не до конца
+        val nearFist = count == 0 || (count == 1 && smooth[ext.indexOfFirst { it }] < 150f)
+        if (nearFist && isThumbUp(p, lm, w, h)) {
             lastDetail = " [большой палец вверх]"
             return Pose.THUMB
+        }
+        if (count == 0) {
+            lastDetail = " [все согнуты; большой ${"%.1f".format(thumbReach)}]"
         }
         return when {
             count == 0 -> Pose.FIST
             ext[0] && !ext[1] && !ext[2] && !ext[3] -> Pose.ONE
             ext[0] && ext[1] && !ext[2] && !ext[3] -> Pose.TWO
+            ext[0] && ext[1] && ext[2] && !ext[3] -> Pose.THREE
             count == 4 -> Pose.OPEN
             else -> Pose.OTHER
         }
