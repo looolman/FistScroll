@@ -3,6 +3,7 @@ package com.fist.scroll
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
 import android.content.Intent
+import android.os.Build
 import android.graphics.Color
 import android.graphics.Path
 import android.graphics.PixelFormat
@@ -151,5 +152,11 @@ class SwipeService : AccessibilityService() {
         val stroke = GestureDescription.StrokeDescription(path, 0, 160)
         val gesture = GestureDescription.Builder().addStroke(stroke).build()
         return dispatchGesture(gesture, null, null)
+    }
+
+    /** Блокирует телефон и гасит экран (полностью выключить питание Android не позволяет). */
+    fun lockScreen(): Boolean {
+        if (Build.VERSION.SDK_INT < 28) return false
+        return performGlobalAction(GLOBAL_ACTION_LOCK_SCREEN)
     }
 }

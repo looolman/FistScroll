@@ -150,6 +150,17 @@ class MainActivity : Activity() {
             }
         }
         root.addView(thumbCheck)
+        val ringCheck = CheckBox(this).apply {
+            text = "⭕ Кольцо «О» — выключить экран. Сомкни кончики большого и указательного пальцев " +
+                "в кольцо и подержи около секунды (дольше других жестов, чтобы не сработало случайно). " +
+                "Телефон не выключится полностью (Android этого не позволяет): экран погаснет и заблокируется."
+            textSize = 15f
+            isChecked = prefs.getBoolean(CameraService.KEY_RING, true)
+            setOnCheckedChangeListener { _, on ->
+                prefs.edit().putBoolean(CameraService.KEY_RING, on).apply()
+            }
+        }
+        root.addView(ringCheck)
 
         // ---- подсказка поверх экрана ----
         root.addView(text("Подсказка «что видит камера»", 18f, true))

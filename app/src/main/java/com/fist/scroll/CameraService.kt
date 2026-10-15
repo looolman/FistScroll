@@ -51,6 +51,7 @@ class CameraService : Service() {
         const val KEY_BRIGHT = "auto_bright"
         const val KEY_ECO = "eco"
         const val KEY_THUMB = "thumb_on"
+        const val KEY_RING = "ring_on"
         const val KEY_HINT = "hint_on"
         const val KEY_HINT_POS = "hint_pos"
         // v2: новые ключи, чтобы применились новые значения по умолчанию (1 = Claude, 2 = TikTok, 3 = Telegram)
@@ -323,7 +324,9 @@ class CameraService : Service() {
             var launchText: String? = null
             val fire: Boolean
             var thumbFire = false
+            var ringFire = false
             val thumbOn = prefs.getBoolean(KEY_THUMB, true)
+            val ringOn = prefs.getBoolean(KEY_RING, true)
             if (faceMode) {
                 val fl = ensureFace() ?: return
                 val res = fl.detectForVideo(mp, now)
@@ -366,18 +369,19 @@ class CameraService : Service() {
 
                 // пальцы для запуска приложений: смотрим руку реже (~8 раз/с), свайп при этом глазом
                 val launchOn = prefs.getBoolean(KEY_LAUNCH, false)
-                if (launchOn || thumbOn) {
+                if (launchOn || thumbOn || ringOn) {
                     if (now - lastHandRun >= (if (eco) 220 else 130)) {
                         lastHandRun = now
                         val hl = ensureHand() ?: return
                         val hres = hl.detectForVideo(mp, now)
                         engine.updateLaunchOnly(
                             hres.landmarks().firstOrNull(), hres.worldLandmarks().firstOrNull(),
-                            bmp.width, bmp.height, now, sens, launchOn, thumbOn
+                            bmp.width, bmp.height, now, sens, launchOn, thumbOn, ringOn
                         )
                         val lp = engine.launchPose
                         if (lp != null) doLaunch(lp, prefs)?.let { launchText = it }
                         thumbFire = engine.thumbFired
+                        ringFire = engine.ringFired
                     }
                     text += " | рука: ${engine.lastPose.title}"
                     if (engine.lastPose != Pose.NONE) hint += " · " + poseHint(engine.lastPose)
@@ -388,8 +392,9 @@ class CameraService : Service() {
                 val hand = res.landmarks().firstOrNull()
                 val world = res.worldLandmarks().firstOrNull()
                 val launchOn = prefs.getBoolean(KEY_LAUNCH, false)
-                fire = engine.updateHand(hand, world, bmp.width, bmp.height, now, mode, sens, launchOn, thumbOn)
+                fire = engine.updateHand(hand, world, bmp.width, bmp.height, now, mode, sens, launchOn, thumbOn, ringOn)
                 thumbFire = engine.thumbFired
+                ringFire = engine.ringFired
                 if (engine.lastPose != Pose.NONE) lastHandSeen = now
                 text = "Вижу: ${engine.lastPose.title}${engine.lastDetail}"
                 hint = poseHint(engine.lastPose)
@@ -424,6 +429,19 @@ class CameraService : Service() {
                 holdHint = hint
                 holdHintUntil = now + 900
             }
+            if (ringFire && !fire && !thumbFire) {
+                val svc = SwipeService.instance
+                text = if (svc == null) {
+                    "Жест есть, но служба спец. возможностей выключена!"
+                } else if (svc.lockScreen()) {
+                    "Экран выключен"
+                } else {
+                    "Не получилось выключить экран"
+                }
+                hint = if (svc == null) "⚠ включи службу" else if (text == "Экран выключен") "🔒 Выключаю экран" else "⚠ не вышло"
+                holdHint = hint
+                holdHintUntil = now + 1200
+            }
             launchText?.let {
                 text = it
                 holdHint = "📱 $it"
@@ -451,6 +469,7 @@ class CameraService : Service() {
         Pose.THREE -> "3️⃣ три пальца"
         Pose.OPEN -> "🖐 открытая ладонь"
         Pose.THUMB -> "👍 палец вверх"
+        Pose.RING -> "⭕ кольцо О"
         Pose.OTHER -> "🤚 рука (непонятный жест)"
     }
 

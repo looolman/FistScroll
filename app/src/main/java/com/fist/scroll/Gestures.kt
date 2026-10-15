@@ -25,6 +25,7 @@ enum class Pose(val title: String) {
     THREE("три пальца"),
     OPEN("открытая ладонь"),
     THUMB("палец вверх"),
+    RING("кольцо О"),
     OTHER("рука")
 }
 
@@ -75,6 +76,18 @@ class GestureEngine {
     var thumbFired = false
         private set
 
+    // кольцо «О» (большой и указательный сомкнуты) = выключить экран
+    private val ringAll = ArrayList<Long>()
+    private val ringHits = ArrayList<Long>()
+    private var ringLastSeen = 0L
+    private var ringArmed = true
+    private var lastRing = 0L
+    private var ringPinch = 0f
+
+    /** true на том кадре, когда пора выключать экран. */
+    var ringFired = false
+        private set
+
     // поднятие бровей
     private val browFrames = ArrayList<Long>()
     private var browArmed = true
@@ -113,7 +126,37 @@ class GestureEngine {
             browInit = false
             thumbSeen.clear()
             thumbArmed = true
+            ringAll.clear()
+            ringHits.clear()
+            ringArmed = true
         }
+    }
+
+    /**
+     * Кольцо «О»: поза должна держаться дольше остальных жестов (~0,7–1 с, зависит от
+     * чувствительности) и занимать большинство кадров, потому что действие «выключить экран»
+     * не должно срабатывать случайно. После срабатывания пауза 3 с, и жест надо убрать.
+     */
+    private fun checkRing(pose: Pose, now: Long, sensitivity: Int): Boolean {
+        if (pose != Pose.NONE) ringAll.add(now)
+        if (pose == Pose.RING) {
+            ringHits.add(now)
+            ringLastSeen = now
+        }
+        while (ringAll.isNotEmpty() && now - ringAll[0] > 1500) ringAll.removeAt(0)
+        while (ringHits.isNotEmpty() && now - ringHits[0] > 1500) ringHits.removeAt(0)
+        if (pose != Pose.RING && now - ringLastSeen > 800) ringArmed = true
+        val holdMs = 1300 - 60 * sensitivity   // чувствительность 5 -> 1 с, 10 -> 0,7 с
+        if (ringArmed && ringHits.size >= 4 && ringHits.size >= 0.6f * ringAll.size &&
+            now - ringHits[0] >= holdMs && now - ringLastSeen < 300 && now - lastRing > 3000
+        ) {
+            ringArmed = false
+            lastRing = now
+            ringAll.clear()
+            ringHits.clear()
+            return true
+        }
+        return false
     }
 
     /**
@@ -204,7 +247,8 @@ class GestureEngine {
         mode: String,
         sensitivity: Int,
         launchEnabled: Boolean,
-        thumbEnabled: Boolean
+        thumbEnabled: Boolean,
+        ringEnabled: Boolean
     ): Boolean {
         syncMode(mode)
 
@@ -223,6 +267,7 @@ class GestureEngine {
         }
         launchPose = if (launchEnabled) checkLaunch(lastPose, mode, now, sensitivity) else null
         thumbFired = if (thumbEnabled) checkThumb(lastPose, now, sensitivity) else false
+        ringFired = if (ringEnabled) checkRing(lastPose, now, sensitivity) else false
 
         if (mode == Mode.WAVE) {
             val fire = updateWave(lm, now, sensitivity) && now - lastTrigger > 1000
@@ -250,7 +295,8 @@ class GestureEngine {
         now: Long,
         sensitivity: Int,
         launchEnabled: Boolean,
-        thumbEnabled: Boolean
+        thumbEnabled: Boolean,
+        ringEnabled: Boolean
     ) {
         val pts: List<P>? = when {
             world != null && world.size >= 21 -> world.map { P(it.x(), it.y(), it.z()) }
@@ -266,6 +312,7 @@ class GestureEngine {
         }
         launchPose = if (launchEnabled) checkLaunch(lastPose, Mode.WINK, now, sensitivity) else null
         thumbFired = if (thumbEnabled) checkThumb(lastPose, now, sensitivity) else false
+        ringFired = if (ringEnabled) checkRing(lastPose, now, sensitivity) else false
     }
 
     var lastFace = false
@@ -440,6 +487,17 @@ class GestureEngine {
         return len > 1e-6f && -uy / len > 0.5f
     }
 
+    /**
+     * Кольцо «О»: кончики большого и указательного пальцев соприкасаются, а указательный при этом
+     * отведён от ладони (иначе это просто кулак). Остальные пальцы могут быть любыми.
+     */
+    private fun isRing(p: List<P>): Boolean {
+        val scale = max(dist(p[0], p[9]), 1e-6f)
+        ringPinch = dist(p[4], p[8]) / scale
+        val loop = dist(p[8], p[5]) / scale
+        return ringPinch < 0.28f && loop > 0.65f
+    }
+
     /** Для статуса: насколько вытянут большой палец (около 1 = прижат, 1,5+ = отставлен). */
     private var thumbReach = 0f
 
@@ -471,6 +529,10 @@ class GestureEngine {
             .let { if (it == " []") " [все согнуты]" else it }
 
         val count = ext.count { it }
+        if (isRing(p)) {
+            lastDetail = " [большой и указательный сомкнуты]"
+            return Pose.RING
+        }
         // «почти кулак»: все пальцы согнуты или один из них согнут не до конца
         val nearFist = count == 0 || (count == 1 && smooth[ext.indexOfFirst { it }] < 150f)
         if (nearFist && isThumbUp(p, lm, w, h)) {
@@ -478,7 +540,7 @@ class GestureEngine {
             return Pose.THUMB
         }
         if (count == 0) {
-            lastDetail = " [все согнуты; большой ${"%.1f".format(thumbReach)}]"
+            lastDetail = " [все согнуты; большой ${"%.1f".format(thumbReach)}; щепотка ${"%.2f".format(ringPinch)}]"
         }
         return when {
             count == 0 -> Pose.FIST
