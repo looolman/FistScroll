@@ -23,6 +23,7 @@ enum class Pose(val title: String) {
     ONE("один палец"),
     TWO("два пальца"),
     OPEN("открытая ладонь"),
+    THUMB("палец вверх"),
     OTHER("рука")
 }
 
@@ -63,6 +64,16 @@ class GestureEngine {
     private var winkArmed = true
     private var lastWinkSeen = 0L
 
+    // палец вверх = предыдущее видео
+    private val thumbSeen = ArrayList<Long>()
+    private var thumbLastSeen = 0L
+    private var thumbArmed = true
+    private var lastThumb = 0L
+
+    /** true на том кадре, когда пора вернуться к предыдущему видео. */
+    var thumbFired = false
+        private set
+
     // поднятие бровей
     private val browFrames = ArrayList<Long>()
     private var browArmed = true
@@ -99,7 +110,32 @@ class GestureEngine {
             browFrames.clear()
             browArmed = true
             browInit = false
+            thumbSeen.clear()
+            thumbArmed = true
         }
+    }
+
+    /**
+     * Палец вверх: поза должна уверенно держаться (~0,25 с и минимум 2–3 кадра в окне 1 с),
+     * потом её нужно убрать. Пауза между срабатываниями 1,2 с.
+     */
+    private fun checkThumb(pose: Pose, now: Long, sensitivity: Int): Boolean {
+        if (pose == Pose.THUMB) {
+            thumbSeen.add(now)
+            thumbLastSeen = now
+        }
+        while (thumbSeen.isNotEmpty() && now - thumbSeen[0] > 1000) thumbSeen.removeAt(0)
+        if (pose != Pose.THUMB && now - thumbLastSeen > 600) thumbArmed = true
+        val need = if (sensitivity >= 7) 2 else 3
+        if (thumbArmed && thumbSeen.size >= need && now - thumbSeen[0] >= 250 &&
+            now - thumbLastSeen < 300 && now - lastThumb > 1200
+        ) {
+            thumbArmed = false
+            lastThumb = now
+            thumbSeen.clear()
+            return true
+        }
+        return false
     }
 
     /**
@@ -165,7 +201,8 @@ class GestureEngine {
         now: Long,
         mode: String,
         sensitivity: Int,
-        launchEnabled: Boolean
+        launchEnabled: Boolean,
+        thumbEnabled: Boolean
     ): Boolean {
         syncMode(mode)
 
@@ -180,9 +217,10 @@ class GestureEngine {
             lastPose = Pose.NONE
             lastDetail = ""
         } else {
-            lastPose = classify(pts)
+            lastPose = classify(pts, imageThumbUp(lm, w, h))
         }
         launchPose = if (launchEnabled) checkLaunch(lastPose, mode, now, sensitivity) else null
+        thumbFired = if (thumbEnabled) checkThumb(lastPose, now, sensitivity) else false
 
         if (mode == Mode.WAVE) {
             val fire = updateWave(lm, now, sensitivity) && now - lastTrigger > 1000
@@ -208,7 +246,9 @@ class GestureEngine {
         w: Int,
         h: Int,
         now: Long,
-        sensitivity: Int
+        sensitivity: Int,
+        launchEnabled: Boolean,
+        thumbEnabled: Boolean
     ) {
         val pts: List<P>? = when {
             world != null && world.size >= 21 -> world.map { P(it.x(), it.y(), it.z()) }
@@ -220,9 +260,10 @@ class GestureEngine {
             lastPose = Pose.NONE
             lastDetail = ""
         } else {
-            lastPose = classify(pts)
+            lastPose = classify(pts, imageThumbUp(lm, w, h))
         }
-        launchPose = checkLaunch(lastPose, Mode.WINK, now, sensitivity)
+        launchPose = if (launchEnabled) checkLaunch(lastPose, Mode.WINK, now, sensitivity) else null
+        thumbFired = if (thumbEnabled) checkThumb(lastPose, now, sensitivity) else false
     }
 
     var lastFace = false
@@ -363,7 +404,32 @@ class GestureEngine {
         return Math.toDegrees(acos(cos.toDouble())).toFloat()
     }
 
-    private fun classify(p: List<P>): Pose {
+    /** Смотрит ли большой палец вверх на самом кадре (у кадра ось y направлена вниз). */
+    private fun imageThumbUp(lm: List<NormalizedLandmark>?, w: Int, h: Int): Boolean? {
+        if (lm == null || lm.size < 21) return null
+        val ux = (lm[4].x() - lm[2].x()) * w
+        val uy = (lm[4].y() - lm[2].y()) * h
+        val len = sqrt(ux * ux + uy * uy)
+        if (len < 1e-6f) return null
+        return -uy / len > 0.6f
+    }
+
+    /** Большой палец выпрямлен, отведён от ладони и смотрит вверх (остальные пальцы согнуты). */
+    private fun isThumbUp(p: List<P>, dirUp: Boolean?): Boolean {
+        val scale = max(dist(p[0], p[9]), 1e-6f)
+        if (angle(p[2], p[3], p[4]) < 145f) return false   // верхний сустав прямой
+        if (angle(p[1], p[2], p[3]) < 135f) return false   // нижний сустав прямой
+        // в кулаке большой палец прижат к указательному, а тут кончик далеко от него
+        if (dist(p[4], p[5]) / scale < 0.9f) return false
+        if (dirUp != null) return dirUp
+        val ux = p[4].x - p[2].x
+        val uy = p[4].y - p[2].y
+        val uz = p[4].z - p[2].z
+        val len = sqrt(ux * ux + uy * uy + uz * uz)
+        return len > 1e-6f && -uy / len > 0.6f
+    }
+
+    private fun classify(p: List<P>, thumbDirUp: Boolean?): Pose {
         for (i in 0 until 4) {
             val f = fingers[i]
             val aPip = angle(p[f[0]], p[f[1]], p[f[2]])
@@ -391,6 +457,10 @@ class GestureEngine {
             .let { if (it == " []") " [все согнуты]" else it }
 
         val count = ext.count { it }
+        if (count == 0 && isThumbUp(p, thumbDirUp)) {
+            lastDetail = " [большой палец вверх]"
+            return Pose.THUMB
+        }
         return when {
             count == 0 -> Pose.FIST
             ext[0] && !ext[1] && !ext[2] && !ext[3] -> Pose.ONE

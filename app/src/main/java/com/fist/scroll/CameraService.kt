@@ -50,6 +50,7 @@ class CameraService : Service() {
         const val KEY_LAUNCH = "launch_on"
         const val KEY_BRIGHT = "auto_bright"
         const val KEY_ECO = "eco"
+        const val KEY_THUMB = "thumb_on"
         const val KEY_HINT = "hint_on"
         const val KEY_HINT_POS = "hint_pos"
         const val KEY_APP_ONE = "app_one"
@@ -319,6 +320,8 @@ class CameraService : Service() {
             var hint: String
             var launchText: String? = null
             val fire: Boolean
+            var thumbFire = false
+            val thumbOn = prefs.getBoolean(KEY_THUMB, true)
             if (faceMode) {
                 val fl = ensureFace() ?: return
                 val res = fl.detectForVideo(mp, now)
@@ -360,17 +363,19 @@ class CameraService : Service() {
                 }
 
                 // пальцы для запуска приложений: смотрим руку реже (~8 раз/с), свайп при этом глазом
-                if (prefs.getBoolean(KEY_LAUNCH, false)) {
+                val launchOn = prefs.getBoolean(KEY_LAUNCH, false)
+                if (launchOn || thumbOn) {
                     if (now - lastHandRun >= (if (eco) 220 else 130)) {
                         lastHandRun = now
                         val hl = ensureHand() ?: return
                         val hres = hl.detectForVideo(mp, now)
                         engine.updateLaunchOnly(
                             hres.landmarks().firstOrNull(), hres.worldLandmarks().firstOrNull(),
-                            bmp.width, bmp.height, now, sens
+                            bmp.width, bmp.height, now, sens, launchOn, thumbOn
                         )
                         val lp = engine.launchPose
                         if (lp != null) doLaunch(lp, prefs)?.let { launchText = it }
+                        thumbFire = engine.thumbFired
                     }
                     text += " | рука: ${engine.lastPose.title}"
                     if (engine.lastPose != Pose.NONE) hint += " · " + poseHint(engine.lastPose)
@@ -381,7 +386,8 @@ class CameraService : Service() {
                 val hand = res.landmarks().firstOrNull()
                 val world = res.worldLandmarks().firstOrNull()
                 val launchOn = prefs.getBoolean(KEY_LAUNCH, false)
-                fire = engine.updateHand(hand, world, bmp.width, bmp.height, now, mode, sens, launchOn)
+                fire = engine.updateHand(hand, world, bmp.width, bmp.height, now, mode, sens, launchOn, thumbOn)
+                thumbFire = engine.thumbFired
                 if (engine.lastPose != Pose.NONE) lastHandSeen = now
                 text = "Вижу: ${engine.lastPose.title}${engine.lastDetail}"
                 hint = poseHint(engine.lastPose)
@@ -400,6 +406,19 @@ class CameraService : Service() {
                     "Свайп не удался"
                 }
                 hint = if (svc == null) "⚠ включи службу" else if (text == "Свайп!") "✅ Свайп!" else "⚠ свайп не удался"
+                holdHint = hint
+                holdHintUntil = now + 900
+            }
+            if (thumbFire && !fire) {
+                val svc = SwipeService.instance
+                text = if (svc == null) {
+                    "Жест есть, но служба спец. возможностей выключена!"
+                } else if (svc.swipeDown()) {
+                    "Назад!"
+                } else {
+                    "Свайп не удался"
+                }
+                hint = if (svc == null) "⚠ включи службу" else if (text == "Назад!") "👍 Назад ✅" else "⚠ свайп не удался"
                 holdHint = hint
                 holdHintUntil = now + 900
             }
@@ -428,6 +447,7 @@ class CameraService : Service() {
         Pose.ONE -> "☝ один палец"
         Pose.TWO -> "✌ два пальца"
         Pose.OPEN -> "🖐 открытая ладонь"
+        Pose.THUMB -> "👍 палец вверх"
         Pose.OTHER -> "🤚 рука (непонятный жест)"
     }
 

@@ -137,6 +137,20 @@ class MainActivity : Activity() {
         }
         root.addView(ecoCheck)
 
+        // ---- палец вверх = предыдущее видео ----
+        root.addView(text("Дополнительный жест", 18f, true))
+        val thumbCheck = CheckBox(this).apply {
+            text = "👍 Палец вверх — предыдущее видео (свайп вниз по экрану). " +
+                "Работает во всех режимах. Покажи большой палец вверх, остальные пальцы сожми, " +
+                "и подержи около четверти секунды."
+            textSize = 15f
+            isChecked = prefs.getBoolean(CameraService.KEY_THUMB, true)
+            setOnCheckedChangeListener { _, on ->
+                prefs.edit().putBoolean(CameraService.KEY_THUMB, on).apply()
+            }
+        }
+        root.addView(thumbCheck)
+
         // ---- подсказка поверх экрана ----
         root.addView(text("Подсказка «что видит камера»", 18f, true))
         val hintCheck = CheckBox(this).apply {

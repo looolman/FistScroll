@@ -139,4 +139,17 @@ class SwipeService : AccessibilityService() {
         val gesture = GestureDescription.Builder().addStroke(stroke).build()
         return dispatchGesture(gesture, null, null)
     }
+
+    /** Свайп сверху вниз по центру экрана = предыдущее видео. */
+    fun swipeDown(): Boolean {
+        val dm = resources.displayMetrics
+        val x = dm.widthPixels / 2f
+        val path = Path().apply {
+            moveTo(x, dm.heightPixels * 0.25f)
+            lineTo(x, dm.heightPixels * 0.78f)
+        }
+        val stroke = GestureDescription.StrokeDescription(path, 0, 160)
+        val gesture = GestureDescription.Builder().addStroke(stroke).build()
+        return dispatchGesture(gesture, null, null)
+    }
 }
