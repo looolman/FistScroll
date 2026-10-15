@@ -13,6 +13,7 @@ object Mode {
     const val TWO = "two"
     const val WAVE = "wave"
     const val WINK = "wink"
+    const val BROW = "brow"
 }
 
 /** Поза руки по одному кадру. */
@@ -62,6 +63,13 @@ class GestureEngine {
     private var winkArmed = true
     private var lastWinkSeen = 0L
 
+    // поднятие бровей
+    private val browFrames = ArrayList<Long>()
+    private var browArmed = true
+    private var lastBrowSeen = 0L
+    private var browBase = 0f
+    private var browInit = false
+
     private val smooth = FloatArray(4)
     private val ext = BooleanArray(4)
     private var fingerInit = false
@@ -88,6 +96,9 @@ class GestureEngine {
             launchArmed = true
             winkFrames.clear()
             winkArmed = true
+            browFrames.clear()
+            browArmed = true
+            browInit = false
         }
     }
 
@@ -251,6 +262,53 @@ class GestureEngine {
             winkArmed = false
             lastTrigger = now
             winkFrames.clear()
+            return true
+        }
+        return false
+    }
+
+
+    var lastBrow = 0f
+        private set
+    var lastBrowBase = 0f
+        private set
+
+    /**
+     * Поднятие бровей. У каждого человека брови в покое стоят немного по-своему, поэтому
+     * сравниваем текущий уровень с «спокойным» (медленно подстраивающимся) и срабатываем,
+     * когда брови заметно выше. Кадры копятся в окне 0,4 с, единичный потерянный кадр не мешает.
+     */
+    fun updateBrow(hasFace: Boolean, brow: Float, now: Long, sensitivity: Int): Boolean {
+        syncMode(Mode.BROW)
+        lastFace = hasFace
+        lastBrow = brow
+        if (!hasFace) {
+            browFrames.clear()
+            return false
+        }
+        if (!browInit) {
+            browBase = brow
+            browInit = true
+        }
+        val rise = 0.50f - 0.04f * sensitivity   // сенс. 5 -> +0,30, сенс. 10 -> +0,10
+        val raised = brow - browBase > rise && brow > 0.18f
+
+        // «спокойный» уровень обновляем только когда брови не подняты
+        if (!raised) browBase += (brow - browBase) * 0.04f
+        lastBrowBase = browBase
+
+        if (raised) {
+            browFrames.add(now)
+            lastBrowSeen = now
+        }
+        while (browFrames.isNotEmpty() && now - browFrames[0] > 400) browFrames.removeAt(0)
+        if (!raised && now - lastBrowSeen > 400) browArmed = true
+
+        val need = if (sensitivity >= 4) 2 else 3
+        if (browArmed && browFrames.size >= need && now - lastTrigger > 900) {
+            browArmed = false
+            lastTrigger = now
+            browFrames.clear()
             return true
         }
         return false

@@ -74,7 +74,8 @@ class MainActivity : Activity() {
             Mode.FIST to "✊ Кулак — сожми руку перед камерой",
             Mode.TWO to "✌ Два пальца — покажи знак V",
             Mode.WAVE to "👋 Взмах — резко проведи рукой вверх",
-            Mode.WINK to "😉 Подмигивание — закрой один глаз"
+            Mode.WINK to "😉 Подмигивание — закрой один глаз",
+            Mode.BROW to "🤨 Брови — подними брови"
         )
         val saved = prefs.getString(CameraService.KEY_MODE, Mode.FIST)
         for ((mode, title) in options) {

@@ -116,7 +116,7 @@ class CameraService : Service() {
         handler!!.post {
             try {
                 val mode = getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY_MODE, Mode.FIST)
-                if (mode == Mode.WINK) createFace().also { faceLm = it } else createHand().also { handLm = it }
+                if (mode == Mode.WINK || mode == Mode.BROW) createFace().also { faceLm = it } else createHand().also { handLm = it }
                 openCamera()
             } catch (e: Throwable) {
                 publish("Ошибка: ${e.message ?: e.javaClass.simpleName}")
@@ -295,7 +295,8 @@ class CameraService : Service() {
             // Сколько ждать между обработанными кадрами:
             //  - подмигивание: ~18 кадров/с
             //  - жесты рукой: ~18 кадров/с, а если руки нет уже 2 секунды — дежурный режим 4 кадра/с
-            val idle = mode != Mode.WINK && now - lastHandSeen > 2000
+            val faceMode = mode == Mode.WINK || mode == Mode.BROW
+            val idle = !faceMode && now - lastHandSeen > 2000
             var gap = if (idle) 250L else 55L
             if (eco) gap = (gap * 1.8f).toLong()
             if (now - lastFrame < gap) return
@@ -309,11 +310,14 @@ class CameraService : Service() {
             var text: String
             var launchText: String? = null
             val fire: Boolean
-            if (mode == Mode.WINK) {
+            if (faceMode) {
                 val fl = ensureFace() ?: return
                 val res = fl.detectForVideo(mp, now)
                 var left = 0f
                 var right = 0f
+                var browInner = 0f
+                var browOutL = 0f
+                var browOutR = 0f
                 var has = false
                 val opt = res.faceBlendshapes()
                 if (opt.isPresent) {
@@ -324,13 +328,24 @@ class CameraService : Service() {
                             when (c.categoryName()) {
                                 "eyeBlinkLeft" -> left = c.score()
                                 "eyeBlinkRight" -> right = c.score()
+                                "browInnerUp" -> browInner = c.score()
+                                "browOuterUpLeft" -> browOutL = c.score()
+                                "browOuterUpRight" -> browOutR = c.score()
                             }
                         }
                     }
                 }
-                fire = engine.updateWink(has, left, right, now, sens)
-                text = if (!has) "Лицо не видно"
-                else "Глаза закрыты: ${(left * 100).toInt()}% и ${(right * 100).toInt()}%"
+                if (mode == Mode.BROW) {
+                    // брови: берём большее из «внутренней части» и среднего по внешним краям
+                    val brow = Math.max(browInner, (browOutL + browOutR) / 2f)
+                    fire = engine.updateBrow(has, brow, now, sens)
+                    text = if (!has) "Лицо не видно"
+                    else "Брови: ${(brow * 100).toInt()}% (в покое ${(engine.lastBrowBase * 100).toInt()}%)"
+                } else {
+                    fire = engine.updateWink(has, left, right, now, sens)
+                    text = if (!has) "Лицо не видно"
+                    else "Глаза закрыты: ${(left * 100).toInt()}% и ${(right * 100).toInt()}%"
+                }
 
                 // пальцы для запуска приложений: смотрим руку реже (~8 раз/с), свайп при этом глазом
                 if (prefs.getBoolean(KEY_LAUNCH, false)) {
