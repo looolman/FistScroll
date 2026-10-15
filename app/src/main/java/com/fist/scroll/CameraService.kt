@@ -469,7 +469,7 @@ class CameraService : Service() {
         Pose.THREE -> "3️⃣ три пальца"
         Pose.OPEN -> "🖐 открытая ладонь"
         Pose.THUMB -> "👍 палец вверх"
-        Pose.RING -> "⭕ кольцо О"
+        Pose.RING -> "👌 кольцо / ОК"
         Pose.OTHER -> "🤚 рука (непонятный жест)"
     }
 

@@ -146,7 +146,7 @@ class GestureEngine {
         while (ringAll.isNotEmpty() && now - ringAll[0] > 1500) ringAll.removeAt(0)
         while (ringHits.isNotEmpty() && now - ringHits[0] > 1500) ringHits.removeAt(0)
         if (pose != Pose.RING && now - ringLastSeen > 800) ringArmed = true
-        val holdMs = 1300 - 60 * sensitivity   // чувствительность 5 -> 1 с, 10 -> 0,7 с
+        val holdMs = 1100 - 60 * sensitivity   // чувствительность 5 -> 0,8 с, 10 -> 0,5 с
         if (ringArmed && ringHits.size >= 4 && ringHits.size >= 0.6f * ringAll.size &&
             now - ringHits[0] >= holdMs && now - ringLastSeen < 300 && now - lastRing > 3000
         ) {
@@ -488,14 +488,17 @@ class GestureEngine {
     }
 
     /**
-     * Кольцо «О»: кончики большого и указательного пальцев соприкасаются, а указательный при этом
-     * отведён от ладони (иначе это просто кулак). Остальные пальцы могут быть любыми.
+     * Кольцо «О» / знак «ОК»: кончики большого и указательного пальцев соприкасаются.
+     * Если остальные три пальца выпрямлены (классический «ОК», как на твоём фото), это точно не кулак,
+     * и достаточно лёгкого касания. Если остальные пальцы согнуты, указательный должен быть заметно
+     * отведён от ладони, иначе это просто кулак.
      */
-    private fun isRing(p: List<P>): Boolean {
+    private fun isRing(p: List<P>, othersExtended: Int): Boolean {
         val scale = max(dist(p[0], p[9]), 1e-6f)
         ringPinch = dist(p[4], p[8]) / scale
         val loop = dist(p[8], p[5]) / scale
-        return ringPinch < 0.28f && loop > 0.65f
+        if (ringPinch > 0.38f) return false
+        return if (othersExtended >= 2) loop > 0.40f else (ringPinch < 0.30f && loop > 0.60f)
     }
 
     /** Для статуса: насколько вытянут большой палец (около 1 = прижат, 1,5+ = отставлен). */
@@ -529,7 +532,8 @@ class GestureEngine {
             .let { if (it == " []") " [все согнуты]" else it }
 
         val count = ext.count { it }
-        if (isRing(p)) {
+        val others = (1..3).count { ext[it] }
+        if (isRing(p, others)) {
             lastDetail = " [большой и указательный сомкнуты]"
             return Pose.RING
         }
@@ -541,6 +545,9 @@ class GestureEngine {
         }
         if (count == 0) {
             lastDetail = " [все согнуты; большой ${"%.1f".format(thumbReach)}; щепотка ${"%.2f".format(ringPinch)}]"
+        }
+        if (ringPinch < 0.7f && count != 0) {
+            lastDetail += " [щепотка ${"%.2f".format(ringPinch)}]"
         }
         return when {
             count == 0 -> Pose.FIST
