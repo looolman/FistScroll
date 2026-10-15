@@ -137,6 +137,35 @@ class MainActivity : Activity() {
         }
         root.addView(ecoCheck)
 
+        // ---- подсказка поверх экрана ----
+        root.addView(text("Подсказка «что видит камера»", 18f, true))
+        val hintCheck = CheckBox(this).apply {
+            text = "💬 Показывать маленькое окошко поверх TikTok: что сейчас видит камера " +
+                "(рука, глаза, брови). Касания сквозь него проходят, TikTok не мешает. " +
+                "Работает, когда включена служба спец. возможностей."
+            textSize = 15f
+            isChecked = prefs.getBoolean(CameraService.KEY_HINT, true)
+            setOnCheckedChangeListener { _, on ->
+                prefs.edit().putBoolean(CameraService.KEY_HINT, on).apply()
+            }
+        }
+        root.addView(hintCheck)
+        root.addView(text("Где показывать окошко:", 16f))
+        val hintPlaces = listOf("Сверху слева", "Сверху справа", "Снизу слева", "Снизу справа")
+        val hintSpinner = Spinner(this)
+        hintSpinner.adapter = ArrayAdapter(
+            this, android.R.layout.simple_spinner_dropdown_item, hintPlaces
+        )
+        hintSpinner.setSelection(prefs.getInt(CameraService.KEY_HINT_POS, 0).coerceIn(0, 3))
+        hintSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(p: AdapterView<*>?, v: View?, pos: Int, id: Long) {
+                prefs.edit().putInt(CameraService.KEY_HINT_POS, pos).apply()
+            }
+
+            override fun onNothingSelected(p: AdapterView<*>?) {}
+        }
+        root.addView(hintSpinner)
+
         // ---- запуск приложений жестом ----
         root.addView(text("Запуск приложений жестом", 18f, true))
         val launchCheck = CheckBox(this).apply {

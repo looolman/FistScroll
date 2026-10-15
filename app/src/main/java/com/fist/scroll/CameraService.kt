@@ -50,6 +50,8 @@ class CameraService : Service() {
         const val KEY_LAUNCH = "launch_on"
         const val KEY_BRIGHT = "auto_bright"
         const val KEY_ECO = "eco"
+        const val KEY_HINT = "hint_on"
+        const val KEY_HINT_POS = "hint_pos"
         const val KEY_APP_ONE = "app_one"
         const val KEY_APP_TWO = "app_two"
         const val ACTION_STOP = "com.fist.scroll.STOP"
@@ -96,6 +98,12 @@ class CameraService : Service() {
     private var gammaSmooth = 1f
     private var lastMean = 128f
     private var lastStatusText = ""
+
+    // подсказка поверх экрана
+    private var holdHint = ""
+    private var holdHintUntil = 0L
+    private var lastHintKey = ""
+    private var lastHintAt = 0L
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -308,6 +316,7 @@ class CameraService : Service() {
             val mp = BitmapImageBuilder(bmp).build()
 
             var text: String
+            var hint: String
             var launchText: String? = null
             val fire: Boolean
             if (faceMode) {
@@ -341,10 +350,13 @@ class CameraService : Service() {
                     fire = engine.updateBrow(has, brow, now, sens)
                     text = if (!has) "Лицо не видно"
                     else "Брови: ${(brow * 100).toInt()}% (в покое ${(engine.lastBrowBase * 100).toInt()}%)"
+                    hint = if (!has) "🙈 лица не видно" else "🤨 брови ${(brow * 10).toInt() * 10}%"
                 } else {
                     fire = engine.updateWink(has, left, right, now, sens)
                     text = if (!has) "Лицо не видно"
                     else "Глаза закрыты: ${(left * 100).toInt()}% и ${(right * 100).toInt()}%"
+                    hint = if (!has) "🙈 лица не видно"
+                    else "😉 глаза ${(left * 10).toInt() * 10}% | ${(right * 10).toInt() * 10}%"
                 }
 
                 // пальцы для запуска приложений: смотрим руку реже (~8 раз/с), свайп при этом глазом
@@ -361,6 +373,7 @@ class CameraService : Service() {
                         if (lp != null) doLaunch(lp, prefs)?.let { launchText = it }
                     }
                     text += " | рука: ${engine.lastPose.title}"
+                    if (engine.lastPose != Pose.NONE) hint += " · " + poseHint(engine.lastPose)
                 }
             } else {
                 val hl = ensureHand() ?: return
@@ -371,6 +384,7 @@ class CameraService : Service() {
                 fire = engine.updateHand(hand, world, bmp.width, bmp.height, now, mode, sens, launchOn)
                 if (engine.lastPose != Pose.NONE) lastHandSeen = now
                 text = "Вижу: ${engine.lastPose.title}${engine.lastDetail}"
+                hint = poseHint(engine.lastPose)
 
                 val lp = engine.launchPose
                 if (lp != null) doLaunch(lp, prefs)?.let { launchText = it }
@@ -385,15 +399,54 @@ class CameraService : Service() {
                 } else {
                     "Свайп не удался"
                 }
+                hint = if (svc == null) "⚠ включи службу" else if (text == "Свайп!") "✅ Свайп!" else "⚠ свайп не удался"
+                holdHint = hint
+                holdHintUntil = now + 900
             }
-            launchText?.let { text = it }
+            launchText?.let {
+                text = it
+                holdHint = "📱 $it"
+                holdHintUntil = now + 1200
+            }
             if (gammaSmooth < 0.95f || expIdx > 0) text += " ☀"
             publish(text)
+
+            // подсказка поверх экрана: «✅ Свайп!» и т.п. держим около секунды, чтобы успеть заметить
+            if (now < holdHintUntil) hint = holdHint
+            updateHint(prefs, hint, now, now < holdHintUntil)
         } catch (e: Throwable) {
             publish("Ошибка: ${e.message ?: e.javaClass.simpleName}")
         } finally {
             image.close()
         }
+    }
+
+
+    private fun poseHint(p: Pose): String = when (p) {
+        Pose.NONE -> "🙈 руки не видно"
+        Pose.FIST -> "✊ кулак"
+        Pose.ONE -> "☝ один палец"
+        Pose.TWO -> "✌ два пальца"
+        Pose.OPEN -> "🖐 открытая ладонь"
+        Pose.OTHER -> "🤚 рука (непонятный жест)"
+    }
+
+    /** Показывает/обновляет маленькое окошко «что видит камера». Обновляем не чаще ~7 раз в секунду. */
+    private fun updateHint(prefs: SharedPreferences, hint: String, now: Long, important: Boolean) {
+        if (!prefs.getBoolean(KEY_HINT, true)) {
+            if (lastHintKey != "off") {
+                lastHintKey = "off"
+                main.post { SwipeService.instance?.hideHint() }
+            }
+            return
+        }
+        val pos = prefs.getInt(KEY_HINT_POS, 0)
+        val key = "$pos|$hint"
+        if (key == lastHintKey) return
+        if (!important && now - lastHintAt < 140) return
+        lastHintKey = key
+        lastHintAt = now
+        main.post { SwipeService.instance?.showHint(hint, pos) }
     }
 
     /** Если в кадре темно, просим камеру сделать светлее (+EV); если светло, возвращаем назад. */
@@ -537,6 +590,7 @@ class CameraService : Service() {
         try { handLm?.close() } catch (_: Throwable) {}
         try { faceLm?.close() } catch (_: Throwable) {}
         thread?.quitSafely()
+        main.post { SwipeService.instance?.hideHint() }
         frameBitmap = null
         pixels = null
         lastStatus = "Остановлено"
